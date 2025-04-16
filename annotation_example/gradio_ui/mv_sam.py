@@ -359,11 +359,13 @@ def _triangulate_centers(
             [center_xyc for center_xyc in center_xyc_dict.values() if center_xyc is not None], axis=0
         ).astype(np.float32)
         centers_xyc = rearrange(centers_xyc, "num_views xyc -> num_views 1 xyc")
-        proj_matrices: list[Float[np.ndarray, "3 4"]] = [exo_cam.projection_matrix for exo_cam in exo_cam_list]
+        proj_matrices: list[Float32[np.ndarray, "3 4"]] = [
+            exo_cam.projection_matrix.astype(np.float32) for exo_cam in exo_cam_list
+        ]
         proj_matrices: Float32[np.ndarray, "num_views 3 4"] = np.stack(proj_matrices, axis=0).astype(np.float32)
 
         proj_matrices_filtered: list[Float32[np.ndarray, "3 4"]] = [
-            exo_cam.projection_matrix for exo_cam in exo_cam_list if exo_cam.name in center_xyc_dict
+            exo_cam.projection_matrix.astype(np.float32) for exo_cam in exo_cam_list if exo_cam.name in center_xyc_dict
         ]
         proj_matrices_filtered: Float32[np.ndarray, "num_views 3 4"] = np.stack(proj_matrices_filtered, axis=0).astype(
             np.float32

@@ -6,9 +6,7 @@ from typing import Literal
 import gradio as gr
 import numpy as np
 import rerun as rr
-from gradio_rerun.events import (
-    SelectionChange,
-)
+from gradio_rerun.events import SelectionChange
 from typing_extensions import TypedDict
 
 
@@ -62,10 +60,12 @@ def update_keypoints(
     mv_keypoint_dict: dict[str, KeypointsContainer],
     log_paths: RerunLogPaths,
     request: gr.Request,
-    evt: SelectionChange,
+    change: SelectionChange,
 ):
     if active_recording_id == "":
         return
+
+    evt = change.payload
 
     # We can only log a keypoint if the user selected only a single item.
     if len(evt.items) != 1:
@@ -73,7 +73,7 @@ def update_keypoints(
     item = evt.items[0]
 
     # If the selected item isn't an entity, or we don't have its position, then bail out.
-    if item.kind != "entity" or item.position is None:
+    if item.type != "entity" or item.position is None:
         return
 
     # Now we can produce a valid keypoint.
