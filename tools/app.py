@@ -2,7 +2,7 @@ import subprocess
 from pathlib import Path
 
 PIXI_PATH = Path("/home/user/.pixi/bin/pixi")
-PIXI_VERSION = "0.27.1"
+PIXI_VERSION = "0.45.0"
 
 
 def check_and_install_pixi() -> None:
@@ -15,9 +15,7 @@ def check_and_install_pixi() -> None:
             f"PIXI_VERSION=v{PIXI_VERSION} curl -fsSL https://pixi.sh/install.sh | bash",
             shell=True,
         )
-        subprocess.check_call(
-            f"{PIXI_PATH} self-update --version {PIXI_VERSION}", shell=True
-        )
+        subprocess.check_call(f"{PIXI_PATH} self-update --version {PIXI_VERSION}", shell=True)
         subprocess.check_call(f"{PIXI_PATH} --version", shell=True)
 
 

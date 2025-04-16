@@ -173,10 +173,9 @@ def single_view_update_keypoints(
     keypoints_container: KeypointsContainer,
     log_paths: RerunLogPaths,
     request: gr.Request,
-    evt: SelectionChange,
+    change: SelectionChange,
 ):
-    if active_recording_id == "":
-        return
+    evt = change.payload
 
     # We can only log a keypoint if the user selected only a single item.
     if len(evt.items) != 1:
@@ -184,7 +183,7 @@ def single_view_update_keypoints(
     item = evt.items[0]
 
     # If the selected item isn't an entity, or we don't have its position, then bail out.
-    if item.kind != "entity" or item.position is None:
+    if item.type != "entity" or item.position is None:
         return
 
     # Now we can produce a valid keypoint.
@@ -213,21 +212,7 @@ def single_view_update_keypoints(
 
 
 def get_recording(recording_id) -> rr.RecordingStream:
-    return rr.RecordingStream(application_id="rerun_vggt_sam", recording_id=recording_id)
-
-
-# Allow using keyword args in gradio to avoid mixing up the order of inputs
-@dataclass
-class InputComponents:
-    video_file: gr.Video
-
-    def to_list(self) -> list:
-        return [getattr(self, f.name) for f in fields(self)]
-
-
-@dataclass
-class InputValues:
-    video_file: str
+    return rr.RecordingStream(application_id="Single View Annotation", recording_id=recording_id)
 
 
 def rescale_img(img_hw3: UInt8[np.ndarray, "h w 3"], max_dim: int) -> UInt8[np.ndarray, "... 3"]:
@@ -242,18 +227,41 @@ def rescale_img(img_hw3: UInt8[np.ndarray, "h w 3"], max_dim: int) -> UInt8[np.n
         new_width = int(width * scale_factor)
 
         # Resize image maintaining aspect ratio
-        resized_img = cv2.resize(img_hw3, (new_width, new_height), interpolation=cv2.INTER_AREA)
+        resized_img: UInt8[np.ndarray, "... 3"] = cv2.resize(
+            img_hw3, (new_width, new_height), interpolation=cv2.INTER_AREA
+        )
         return resized_img
 
     # Return original image if no resize needed
     return img_hw3
 
 
+# Allow using keyword args in gradio to avoid mixing up the order of inputs
+# a bit of an antipattern that is requied to make things work with beartype + keyword args
+@dataclass
+class PreprocessVideoComponents:
+    video_file: gr.Video
+
+    def to_list(self) -> list:
+        return [getattr(self, f.name) for f in fields(self)]
+
+
+@dataclass
+class PreprocessVideoValues:
+    video_file: str
+
+
 def preprocess_video(
+    *input_params,
+):
+    yield from _preprocess_video(*input_params)
+
+
+def _preprocess_video(
     *input_params,
     progress=gr.Progress(track_tqdm=True),  # noqa B008
 ):
-    input_values = InputValues(*input_params)
+    input_values: PreprocessVideoValues = PreprocessVideoValues(*input_params)
     # create a new recording id, and store it in a Gradio's session state.
     recording_id: uuid.UUID = uuid.uuid4()
     rec: rr.RecordingStream = get_recording(recording_id)
@@ -325,13 +333,6 @@ def reset_keypoints(active_recording_id: uuid.UUID, keypoints_container: Keypoin
     keypoints_container.clear()
 
     rec.set_time_sequence(log_paths["timeline_name"], sequence=0)
-    # Log include points if any exist
-    # paths_to_clear = ["include", "exclude", "segmentation", "depth", "image"]
-    # for path in paths_to_clear:
-    #     rec.log(
-    #         f"{log_paths['pinhole_path']}/{path}",
-    #         rr.Clear(recursive=True),
-    #     )
     rec.log(
         f"{log_paths['pinhole_path']}/image/include",
         rr.Clear(recursive=True),
@@ -507,7 +508,7 @@ with gr.Blocks() as single_view_block:
     recording_id = gr.State()
     log_paths = gr.State({})
 
-    input_components = InputComponents(
+    input_components = PreprocessVideoComponents(
         video_file=video_in,
     )
 

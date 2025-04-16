@@ -23,7 +23,12 @@ from simplecv.ops.triangulate import batch_triangulate, projectN3
 from simplecv.ops.tsdf_depth_fuser import Open3DFuser
 from simplecv.video_io import MultiVideoReader
 
-from annotation_example.gradio_ui.callbacks import KeypointsContainer, RerunLogPaths, get_recording, update_keypoints
+from annotation_example.gradio_ui.mv_sam_callbacks import (
+    KeypointsContainer,
+    RerunLogPaths,
+    get_recording,
+    update_keypoints,
+)
 
 if gr.NO_RELOAD:
     VIDEO_SAM_PREDICTOR: SAM2VideoPredictor = SAM2VideoPredictor.from_pretrained("facebook/sam2-hiera-tiny")
@@ -550,22 +555,7 @@ def _log_dataset(dataset_name: Literal["hocap", "assembly101"]):
     yield stream.read(), recording_id, log_paths, mv_keypoint_dict, rgb_list, exo_cam_list, pcd
 
 
-@no_type_check
 def handle_export(
-    exo_cam_list: list[PinholeParameters],
-    rgb_list: list[UInt8[np.ndarray, "h w 3"]],
-    masks_list: list[UInt8[np.ndarray, "h w"]],
-    pointcloud: o3d.geometry.PointCloud,
-):
-    return _handle_export(
-        exo_cam_list=exo_cam_list,
-        rgb_list=rgb_list,
-        masks_list=masks_list,
-        pointcloud=pointcloud,
-    )
-
-
-def _handle_export(
     exo_cam_list: list[PinholeParameters],
     rgb_list: list[UInt8[np.ndarray, "h w 3"]],
     masks_list: list[UInt8[np.ndarray, "h w"]],
