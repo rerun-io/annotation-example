@@ -458,6 +458,7 @@ environments:
       - pypi: https://files.pythonhosted.org/packages/ed/1f/95cb961341bf33e534a472672ef4916c90046dc3c57b1442f5586dda72f1/geffnet-1.0.2-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/86/c7/75c21dacb2e09fe5fd7c571dfd14a83dd2ffaf69cb3e2f5347d264a217ef/gradio-5.25.1-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/15/c8/0df7f92c8f1bdf5c244c29de8cd7e33a5931768ddba245526a770bfa18a2/gradio_client-1.8.0-py3-none-any.whl
+      - pypi: direct+https://huggingface.co/datasets/pablovela5620/gradio-rr-0.23/resolve/main/gradio_rerun-0.0.8-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/28/27/3d6dcadc8a3214d8522c1e7f6a19554e33659be44546d44a2f7572ac7d2a/groovy-0.1.2-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/95/04/ff642e65ad6b90db43e668d70ffb6736436c7ce41fcc549f4e9472234127/h11-0.14.0-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/d6/d8/f87ea6f42456254b48915970ed98e993110521e9263472840174d32c880d/hf_transfer-0.1.9-cp38-abi3-manylinux_2_17_x86_64.manylinux2014_x86_64.whl
@@ -532,7 +533,6 @@ environments:
       - pypi: https://files.pythonhosted.org/packages/93/1f/5d6dbf551766308f6f50f8baf8e9860be6182911e8106da7a7f73785f4c4/websockets-15.0.1-cp311-cp311-manylinux_2_5_x86_64.manylinux1_x86_64.manylinux_2_17_x86_64.manylinux2014_x86_64.whl
       - pypi: https://files.pythonhosted.org/packages/37/81/6acd6601f61e31cfb8729d3da6d5df966f80f374b78eff83760714487338/yapf-0.43.0-py3-none-any.whl
       - pypi: .
-      - pypi: dist/gradio_rerun-0.0.8-py3-none-any.whl
   spaces:
     channels:
     - url: https://conda.anaconda.org/conda-forge/
@@ -991,6 +991,7 @@ environments:
       - pypi: https://files.pythonhosted.org/packages/ed/1f/95cb961341bf33e534a472672ef4916c90046dc3c57b1442f5586dda72f1/geffnet-1.0.2-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/34/77/880f74e82a1320d08133159555e134716db846343c6ad39d8642ef4c5346/gradio-5.25.2-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/15/c8/0df7f92c8f1bdf5c244c29de8cd7e33a5931768ddba245526a770bfa18a2/gradio_client-1.8.0-py3-none-any.whl
+      - pypi: direct+https://huggingface.co/datasets/pablovela5620/gradio-rr-0.23/resolve/main/gradio_rerun-0.0.8-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/28/27/3d6dcadc8a3214d8522c1e7f6a19554e33659be44546d44a2f7572ac7d2a/groovy-0.1.2-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/95/04/ff642e65ad6b90db43e668d70ffb6736436c7ce41fcc549f4e9472234127/h11-0.14.0-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/d6/d8/f87ea6f42456254b48915970ed98e993110521e9263472840174d32c880d/hf_transfer-0.1.9-cp38-abi3-manylinux_2_17_x86_64.manylinux2014_x86_64.whl
@@ -1067,7 +1068,6 @@ environments:
       - pypi: https://files.pythonhosted.org/packages/93/1f/5d6dbf551766308f6f50f8baf8e9860be6182911e8106da7a7f73785f4c4/websockets-15.0.1-cp311-cp311-manylinux_2_5_x86_64.manylinux1_x86_64.manylinux_2_17_x86_64.manylinux2014_x86_64.whl
       - pypi: https://files.pythonhosted.org/packages/37/81/6acd6601f61e31cfb8729d3da6d5df966f80f374b78eff83760714487338/yapf-0.43.0-py3-none-any.whl
       - pypi: .
-      - pypi: dist/gradio_rerun-0.0.8-py3-none-any.whl
 packages:
 - conda: https://conda.anaconda.org/conda-forge/linux-64/_libgcc_mutex-0.1-conda_forge.tar.bz2
   sha256: fe51de6107f9edc7aa4f786a70f4a883943bc9d39b3bb7307c04c41410990726
@@ -1164,7 +1164,7 @@ packages:
 - pypi: .
   name: annotation-example
   version: 0.1.0
-  sha256: 24f13019638f08f27b7ddb6536a74d9ebf5796ec85ac3a1cc4c9fc04465504c1
+  sha256: b354507360f9865edae3de96155044deaa8ba3154cc285ae1bf28bc90d4b5161
   requires_dist:
   - mmcv-lite>=2.2.0,<2.3
   - hf-transfer>=0.1.8,<0.2
@@ -3243,7 +3243,7 @@ packages:
   - typing-extensions~=4.0
   - websockets>=10.0,<16.0
   requires_python: '>=3.10'
-- pypi: dist/gradio_rerun-0.0.8-py3-none-any.whl
+- pypi: direct+https://huggingface.co/datasets/pablovela5620/gradio-rr-0.23/resolve/main/gradio_rerun-0.0.8-py3-none-any.whl
   name: gradio-rerun
   version: 0.0.8
   requires_dist:
@@ -7319,6 +7319,19 @@ packages:
   - hydra-core>=1.3.2
   - iopath>=0.1.10
   - pillow>=9.4.0
+  - matplotlib>=3.9.1 ; extra == 'notebooks'
+  - jupyter>=1.0.0 ; extra == 'notebooks'
+  - opencv-python>=4.7.0 ; extra == 'notebooks'
+  - eva-decord>=0.6.1 ; extra == 'notebooks'
+  - flask>=3.0.3 ; extra == 'interactive-demo'
+  - flask-cors>=5.0.0 ; extra == 'interactive-demo'
+  - av>=13.0.0 ; extra == 'interactive-demo'
+  - dataclasses-json>=0.6.7 ; extra == 'interactive-demo'
+  - eva-decord>=0.6.1 ; extra == 'interactive-demo'
+  - gunicorn>=23.0.0 ; extra == 'interactive-demo'
+  - imagesize>=1.4.1 ; extra == 'interactive-demo'
+  - pycocotools>=2.0.8 ; extra == 'interactive-demo'
+  - strawberry-graphql>=0.243.0 ; extra == 'interactive-demo'
   - black==24.2.0 ; extra == 'dev'
   - usort==1.0.2 ; extra == 'dev'
   - ufmt==2.0.0b2 ; extra == 'dev'
@@ -7330,19 +7343,6 @@ packages:
   - tensordict>=0.6.0 ; extra == 'dev'
   - opencv-python>=4.7.0 ; extra == 'dev'
   - submitit>=1.5.1 ; extra == 'dev'
-  - flask>=3.0.3 ; extra == 'interactive-demo'
-  - flask-cors>=5.0.0 ; extra == 'interactive-demo'
-  - av>=13.0.0 ; extra == 'interactive-demo'
-  - dataclasses-json>=0.6.7 ; extra == 'interactive-demo'
-  - eva-decord>=0.6.1 ; extra == 'interactive-demo'
-  - gunicorn>=23.0.0 ; extra == 'interactive-demo'
-  - imagesize>=1.4.1 ; extra == 'interactive-demo'
-  - pycocotools>=2.0.8 ; extra == 'interactive-demo'
-  - strawberry-graphql>=0.243.0 ; extra == 'interactive-demo'
-  - matplotlib>=3.9.1 ; extra == 'notebooks'
-  - jupyter>=1.0.0 ; extra == 'notebooks'
-  - opencv-python>=4.7.0 ; extra == 'notebooks'
-  - eva-decord>=0.6.1 ; extra == 'notebooks'
   requires_python: '>=3.10.0'
 - conda: https://conda.anaconda.org/conda-forge/linux-64/sdl2-2.32.54-h9b8e6db_0.conda
   sha256: 5c9aec59ef12e15835be3b1e37e6aba6e448d2595c6a0cf920b3dcda059d7079
