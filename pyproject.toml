@@ -1,0 +1,157 @@
+[project]
+name = "annotation-example"
+version = "0.1.0"
+description = "Add a short description here"
+authors = [{ name = "Pablo Vela", email = "pablovela5620@gmail.com" }]
+requires-python = ">= 3.10"
+dependencies = [
+    "mmcv-lite>=2.2.0,<2.3",
+    "build>=1.2.1,<2",
+    "hf-transfer>=0.1.8,<0.2",
+]
+
+[build-system]
+requires = ["setuptools"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["annotation_example*"]
+
+[tool.pixi.project]
+channels = ["conda-forge"]
+platforms = ["linux-64"]
+
+
+[tool.pixi.activation]
+scripts = [".pixi.sh"]
+
+[tool.pixi.pypi-options]
+extra-index-urls = ["https://download.pytorch.org/whl/nightly/cu128"]
+no-build-isolation = ["xformers"]
+
+
+[tool.pixi.tasks]
+_install-wheel = "uv pip install ./$WHL_PATH --force-reinstall"
+_build-wheel = "python -m build"
+upload-hf = { cmd = "python tools/upload_to_hf.py", depends-on = [
+    "_build-wheel",
+] }
+
+[tool.pixi.tasks.app]
+cmd = """
+    python tools/gradio_app_singleview.py
+    """
+description = "Runs Gradio frontend"
+depends-on = ["_download-hocap-sample"]
+
+[tool.pixi.tasks.multiview-app]
+cmd = """
+    python tools/gradio_app_multiview.py
+    """
+description = "Runs Gradio frontend"
+depends-on = ["_download-hocap-sample"]
+
+[tool.pixi.tasks.dev-app]
+cmd = """
+    gradio tools/gradio_app.py
+    """
+description = "Runs Gradio frontend for hotreload"
+
+[tool.pixi.tasks._download-hocap-sample]
+cmd = """
+    test -e data/hocap/sample.zip \
+    && test -e data/hocap/sample \
+    || (
+        mkdir -p data/hocap/ \
+        && huggingface-cli download pablovela5620/hocap-sample \
+        sample.zip --repo-type dataset \
+        --local-dir data/hocap/ \
+        && unzip -o data/hocap/sample.zip -d data/hocap/
+    )
+    """
+outputs = ["data/hocap/sample.zip", "data/hocap/sample"]
+description = "Downloads and extracts an example polycam dataset from huggingface, this may take a while"
+
+[tool.pixi.tasks._download-assembly101-sample]
+cmd = """
+test -e data/assembly101-sample \
+  || (huggingface-cli download pablovela5620/Assembly101-Sample \
+    --repo-type dataset \
+    --include "assembly101-sample/**" \
+    --local-dir data/)
+"""
+outputs = ["data/assembly101-sample"]
+description = "Downloads an example assembly101 dataset from huggingface"
+
+# [tool.pixi.feature.spaces.tasks.app]
+# cmd = """
+#     python gradio_app.py
+#     """
+# description = "Runs Gradio frontend for depth comparison"
+# depends-on = ["_install-wheel"]
+
+[tool.pixi.pypi-dependencies]
+annotation_example = { path = ".", editable = true }
+sam-2 = { git = "https://github.com/facebookresearch/segment-anything-2.git", rev = "2b90b9f5ceec907a1c18123530e92e794ad901a4" }
+torch = { version = ">=2.5.1", index = "https://download.pytorch.org/whl/nightly/cu128" }
+torchvision = { version = ">=0.20.1", index = "https://download.pytorch.org/whl/nightly/cu128" }
+torchcodec = { version = ">=0.2.1", index = "https://download.pytorch.org/whl/nightly/cu128" }
+# cu128 version of xformers not yet available, needs to be built from source
+# xformers = { version = ">=0.0.28.post3", index = "https://download.pytorch.org/whl/nightly/cu128" }
+xformers = { git = "https://github.com/facebookresearch/xformers.git", rev = "main" }
+vggt = { git = "https://github.com/facebookresearch/vggt.git", rev = "f8bf73ac25d5089cca2d6540a185697087fa2255" }
+monopriors = { git = "https://github.com/pablovela5620/monoprior.git", rev = "90fe03ab3a4ee1b8df542d5b8638bf034d933757" }
+gradio-rerun = { url = "https://huggingface.co/datasets/pablovela5620/gradio-rr-0.23/resolve/main/gradio_rerun-0.0.8-py3-none-any.whl" }
+rerun-sdk = { url = "https://files.pythonhosted.org/packages/41/9c/9b50e57e1ef2ece7ae5d409ae5c68fce1942b49528b5bb7ad675748c8748/rerun_sdk-0.23.0a2-cp38-abi3-manylinux_2_31_x86_64.whl" }
+simplecv = { git = "https://github.com/pablovela5620/simplecv.git", rev = "e39f6d87126d8348e40fd2b46c30ced5d76cad76" }
+
+
+[tool.pixi.dependencies]
+python = "3.11.*"
+uv = ">=0.3.4,<0.4"
+einops = ">=0.8.0,<0.9"
+py-opencv = ">=4.11.0,<5"
+transformers = ">=4.50.0,<5"
+setuptools = ">=75.8.2,<76"
+numpy = "<2"
+ffmpeg = ">=7.1.1,<8"
+pyserde = ">=0.23.0,<0.24"
+jaxtyping = ">=0.2.36,<0.3"
+open3d = ">=0.19.0,<0.20"
+easydict = ">=1.13,<2"
+ninja = ">=1.12.1,<2"
+cuda = "12.8.*"
+cuda-nvcc = "12.8.*"
+cudnn = ">=9.8.0.87,<10"
+
+# [tool.pixi.feature.spaces.pypi-dependencies]
+# spaces = "==0.29.3"
+
+
+# [tool.pixi.environments]
+# spaces = { features = ["spaces"], solve-group = "default" }
+
+
+[tool.ruff]
+line-length = 150
+select = [
+    # pycodestyle
+    "E",
+    # Pyflakes
+    "F",
+    # pyupgrade
+    "UP",
+    # flake8-bugbear
+    "B",
+    # flake8-simplify
+    "SIM",
+    # isort
+    "I",
+]
+
+ignore = [
+    "E501",   # Line too long.
+    "F722",   # Forward annotation false positive from jaxtyping. Should be caught by pyright.
+    "F821",   # Forward annotation false positive from jaxtyping. Should be caught by pyright.
+    "SIM117", # Use a single `with` statement with multiple contexts instead of nested `with` statements
+]
