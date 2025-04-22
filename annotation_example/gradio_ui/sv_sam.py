@@ -11,7 +11,7 @@ import tempfile
 import uuid
 from dataclasses import dataclass, fields
 from pathlib import Path
-from typing import Literal, TypedDict
+from typing import no_type_check
 
 import cv2
 import gradio as gr
@@ -21,9 +21,6 @@ import rerun.blueprint as rrb
 import torch
 from einops import rearrange
 from gradio_rerun import Rerun
-from gradio_rerun.events import (
-    SelectionChange,
-)
 from jaxtyping import Bool, Float, Float32, UInt8
 from monopriors.depth_utils import clip_disparity, depth_edges_mask, depth_to_points
 from monopriors.relative_depth_models.depth_anything_v2 import (
@@ -33,19 +30,14 @@ from monopriors.relative_depth_models.depth_anything_v2 import (
 from sam2.sam2_video_predictor import SAM2VideoPredictor
 from simplecv.video_io import VideoReader
 
+from annotation_example.gradio_ui.sv_sam_callbacks import RerunLogPaths, single_view_update_keypoints
+from annotation_example.gradio_ui.utils import KeypointsContainer, get_recording
 from annotation_example.op import create_blueprint
 
 if gr.NO_RELOAD:
     VIDEO_SAM_PREDICTOR: SAM2VideoPredictor = SAM2VideoPredictor.from_pretrained("facebook/sam2-hiera-tiny")
     DEPTH_PREDICTOR = DepthAnythingV2Predictor(device="cpu", encoder="vits")
     DEPTH_PREDICTOR.set_model_device("cuda")
-
-
-class RerunLogPaths(TypedDict):
-    timeline_name: str
-    parent_log_path: Path
-    camera_log_path: Path
-    pinhole_path: Path
 
 
 def log_relative_pred_rec(
@@ -95,7 +87,7 @@ def log_relative_pred_rec(
             rr.SegmentationImage(edges_mask.astype(np.uint8)),
         )
         depth_hw: Float32[np.ndarray, "h w"] = depth_hw * ~edges_mask
-        clipped_disparity: Float32[np.ndarray, "h w"] = clipped_disparity * ~edges_mask
+        clipped_disparity: UInt8[np.ndarray, "h w"] = clipped_disparity * ~edges_mask
 
     if seg_mask_hw is not None:
         rec.log(
@@ -103,7 +95,7 @@ def log_relative_pred_rec(
             rr.SegmentationImage(seg_mask_hw),
         )
         depth_hw: Float32[np.ndarray, "h w"] = depth_hw  # * seg_mask_hw
-        clipped_disparity: Float32[np.ndarray, "h w"] = clipped_disparity  # * seg_mask_hw
+        clipped_disparity: UInt8[np.ndarray, "h w"] = clipped_disparity  # * seg_mask_hw
 
     rec.log(f"{pinhole_path}/depth", rr.DepthImage(depth_hw))
 
@@ -131,88 +123,6 @@ def log_relative_pred_rec(
             colors=colors,
         ),
     )
-
-
-@dataclass
-class KeypointsContainer:
-    """Container for include and exclude keypoints"""
-
-    include_points: np.ndarray  # shape (n,2)
-    exclude_points: np.ndarray  # shape (m,2)
-
-    @classmethod
-    def empty(cls) -> "KeypointsContainer":
-        """Create an empty keypoints container"""
-        return cls(include_points=np.zeros((0, 2), dtype=float), exclude_points=np.zeros((0, 2), dtype=float))
-
-    def add_point(self, point: tuple[float, float], label: Literal["include", "exclude"]) -> None:
-        """Add a point with the specified label"""
-        point_array = np.array([point], dtype=float)
-        if label == "include":
-            self.include_points = (
-                np.vstack([self.include_points, point_array]) if self.include_points.shape[0] > 0 else point_array
-            )
-        else:
-            self.exclude_points = (
-                np.vstack([self.exclude_points, point_array]) if self.exclude_points.shape[0] > 0 else point_array
-            )
-
-    def clear(self) -> None:
-        """Clear all points"""
-        self.include_points = np.zeros((0, 2), dtype=float)
-        self.exclude_points = np.zeros((0, 2), dtype=float)
-
-
-# In this function, the `request` and `evt` parameters will be automatically injected by Gradio when this event listener is fired.
-#
-# `SelectionChange` is a subclass of `EventData`: https://www.gradio.app/docs/gradio/eventdata
-# `gr.Request`: https://www.gradio.app/main/docs/gradio/request
-def single_view_update_keypoints(
-    active_recording_id: uuid.UUID,
-    point_type: Literal["include", "exclude"],
-    keypoints_container: KeypointsContainer,
-    log_paths: RerunLogPaths,
-    request: gr.Request,
-    change: SelectionChange,
-):
-    evt = change.payload
-
-    # We can only log a keypoint if the user selected only a single item.
-    if len(evt.items) != 1:
-        return
-    item = evt.items[0]
-
-    # If the selected item isn't an entity, or we don't have its position, then bail out.
-    if item.type != "entity" or item.position is None:
-        return
-
-    # Now we can produce a valid keypoint.
-    rec: rr.RecordingStream = get_recording(active_recording_id)
-    stream: rr.BinaryStream = rec.binary_stream()
-    current_keypoint: tuple[int, int] = item.position[0:2]
-    keypoints_container.add_point(current_keypoint, point_type)
-
-    rec.set_time_sequence(log_paths["timeline_name"], sequence=0)
-    # Log include points if any exist
-    if keypoints_container.include_points.shape[0] > 0:
-        rec.log(
-            f"{item.entity_path}/include", rr.Points2D(keypoints_container.include_points, colors=(0, 255, 0), radii=5)
-        )
-
-    # Log exclude points if any exist
-    if keypoints_container.exclude_points.shape[0] > 0:
-        rec.log(
-            f"{item.entity_path}/exclude",
-            rr.Points2D(keypoints_container.exclude_points, colors=(255, 0, 0), radii=5),
-        )
-
-    # Ensure we consume everything from the recording.
-    stream.flush()
-    yield stream.read(), keypoints_container
-
-
-def get_recording(recording_id) -> rr.RecordingStream:
-    return rr.RecordingStream(application_id="Single View Annotation", recording_id=recording_id)
 
 
 def rescale_img(img_hw3: UInt8[np.ndarray, "h w 3"], max_dim: int) -> UInt8[np.ndarray, "... 3"]:
@@ -251,10 +161,11 @@ class PreprocessVideoValues:
     video_file: str
 
 
+@no_type_check
 def preprocess_video(
-    *input_params,
+    *preprocess_video_params,
 ):
-    yield from _preprocess_video(*input_params)
+    yield from _preprocess_video(*preprocess_video_params)
 
 
 def _preprocess_video(
@@ -325,7 +236,16 @@ def _preprocess_video(
     yield gr.Accordion(open=False), stream.read(), inference_state, Path(tmp_frames_dir), recording_id, log_paths
 
 
-def reset_keypoints(active_recording_id: uuid.UUID, keypoints_container: KeypointsContainer, log_paths: RerunLogPaths):
+@no_type_check
+def reset_keypoints(
+    active_recording_id: uuid.UUID,
+    keypoints_container: KeypointsContainer,
+    log_paths: RerunLogPaths,
+):
+    yield from _reset_keypoints(active_recording_id, keypoints_container, log_paths)
+
+
+def _reset_keypoints(active_recording_id: uuid.UUID, keypoints_container: KeypointsContainer, log_paths: RerunLogPaths):
     # Now we can produce a valid keypoint.
     rec: rr.RecordingStream = get_recording(active_recording_id)
     stream: rr.BinaryStream = rec.binary_stream()
@@ -355,7 +275,17 @@ def reset_keypoints(active_recording_id: uuid.UUID, keypoints_container: Keypoin
     yield stream.read(), keypoints_container
 
 
+@no_type_check
 def get_initial_mask(
+    recording_id: uuid.UUID,
+    inference_state: dict,
+    keypoint_container: KeypointsContainer,
+    log_paths: RerunLogPaths,
+):
+    yield from _get_initial_mask(recording_id, inference_state, keypoint_container, log_paths)
+
+
+def _get_initial_mask(
     recording_id: uuid.UUID,
     inference_state: dict,
     keypoint_container: KeypointsContainer,
@@ -404,7 +334,18 @@ def get_initial_mask(
     yield stream.read()
 
 
+@no_type_check
 def propagate_mask(
+    recording_id: uuid.UUID,
+    inference_state: dict,
+    keypoint_container: KeypointsContainer,
+    frames_dir: Path,
+    log_paths: RerunLogPaths,
+):
+    yield from _propagate_mask(recording_id, inference_state, keypoint_container, frames_dir, log_paths)
+
+
+def _propagate_mask(
     recording_id: uuid.UUID,
     inference_state: dict,
     keypoint_container: KeypointsContainer,
@@ -488,7 +429,7 @@ with gr.Blocks() as single_view_block:
                 value="include",
                 scale=1,
             )
-            clear_points_btn = gr.Button("Clear Points", scale=1)
+            reset_points_btn = gr.Button("Clear Points", scale=1)
             get_initial_mask_btn = gr.Button("Get Initial Mask", scale=1)
             propagate_mask_btn = gr.Button("Propagate Mask", scale=1)
             stop_propagation_btn = gr.Button("Stop Propagation", scale=1)
@@ -508,14 +449,14 @@ with gr.Blocks() as single_view_block:
     recording_id = gr.State()
     log_paths = gr.State({})
 
-    input_components = PreprocessVideoComponents(
+    preprocess_video_comps = PreprocessVideoComponents(
         video_file=video_in,
     )
 
     # triggered on video upload
     video_in.upload(
         fn=preprocess_video,
-        inputs=input_components.to_list(),
+        inputs=preprocess_video_comps.to_list(),
         outputs=[video_in_drawer, viewer, inference_state, frames_dir, recording_id, log_paths],
     )
 
@@ -530,7 +471,7 @@ with gr.Blocks() as single_view_block:
         outputs=[viewer, keypoints],
     )
 
-    clear_points_btn.click(
+    reset_points_btn.click(
         fn=reset_keypoints,
         inputs=[recording_id, keypoints, log_paths],
         outputs=[viewer, keypoints],

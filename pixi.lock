@@ -1246,7 +1246,7 @@ packages:
 - pypi: .
   name: annotation-example
   version: 0.1.0
-  sha256: a00ed3bb07c5492d064b62bae2269e301dbc0bf9dd44cee253f3a3b70f258c91
+  sha256: 2bd1436acfdc1140a6e575c7ffb44023b353351f971100cbaa3a7c0c5ce6abc1
   requires_dist:
   - mmcv-lite>=2.2.0,<2.3
   - hf-transfer>=0.1.8,<0.2

@@ -56,7 +56,7 @@ depends-on = ["_download-hocap-sample"]
 
 [tool.pixi.tasks.dev-app]
 cmd = """
-    gradio tools/gradio_app.py
+    gradio tools/gradio_app_singleview.py
     """
 description = "Runs Gradio frontend for hotreload"
 
