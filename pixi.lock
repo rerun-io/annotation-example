@@ -508,7 +508,7 @@ environments:
       - pypi: https://files.pythonhosted.org/packages/45/58/38b5afbc1a800eeea951b9285d3912613f2603bdf897a4ab0f4bd7f405fc/python_multipart-0.0.20-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/82/ff/5701f79317a1a03e5ee8a1bf48e7273a8445162a2774e51fc06411a67c89/pytorch_lightning-2.5.1-py3-none-any.whl
       - pypi: https://download.pytorch.org/whl/nightly/pytorch_triton-3.3.0%2Bgit96316ce5-cp311-cp311-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl
-      - pypi: direct+https://github.com/rerun-io/rerun/releases/download/prerelease/rerun_sdk-0.23.0a3+dev-cp38-abi3-manylinux_2_31_x86_64.whl
+      - pypi: direct+https://github.com/rerun-io/rerun/releases/download/prerelease/rerun_sdk-0.23.0a3+dev-cp39-abi3-manylinux_2_31_x86_64.whl
       - pypi: https://files.pythonhosted.org/packages/79/89/0af10c8af4363304fd8cb833bd407a2850c760b71edf742c18d5a87bb3ad/ruff-0.11.5-py3-none-manylinux_2_17_x86_64.manylinux2014_x86_64.whl
       - pypi: https://files.pythonhosted.org/packages/4d/c0/1108ad9f01567f66b3154063605b350b69c3c9366732e09e45f9fd0d1deb/safehttpx-0.1.6-py3-none-any.whl
       - pypi: git+https://github.com/facebookresearch/segment-anything-2.git?rev=2b90b9f5ceec907a1c18123530e92e794ad901a4#2b90b9f5ceec907a1c18123530e92e794ad901a4
@@ -1044,7 +1044,7 @@ environments:
       - pypi: https://files.pythonhosted.org/packages/45/58/38b5afbc1a800eeea951b9285d3912613f2603bdf897a4ab0f4bd7f405fc/python_multipart-0.0.20-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/82/ff/5701f79317a1a03e5ee8a1bf48e7273a8445162a2774e51fc06411a67c89/pytorch_lightning-2.5.1-py3-none-any.whl
       - pypi: https://download.pytorch.org/whl/nightly/pytorch_triton-3.3.0%2Bgit96316ce5-cp311-cp311-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl
-      - pypi: direct+https://github.com/rerun-io/rerun/releases/download/prerelease/rerun_sdk-0.23.0a3+dev-cp38-abi3-manylinux_2_31_x86_64.whl
+      - pypi: direct+https://github.com/rerun-io/rerun/releases/download/prerelease/rerun_sdk-0.23.0a3+dev-cp39-abi3-manylinux_2_31_x86_64.whl
       - pypi: https://files.pythonhosted.org/packages/79/89/0af10c8af4363304fd8cb833bd407a2850c760b71edf742c18d5a87bb3ad/ruff-0.11.5-py3-none-manylinux_2_17_x86_64.manylinux2014_x86_64.whl
       - pypi: https://files.pythonhosted.org/packages/4d/c0/1108ad9f01567f66b3154063605b350b69c3c9366732e09e45f9fd0d1deb/safehttpx-0.1.6-py3-none-any.whl
       - pypi: git+https://github.com/facebookresearch/segment-anything-2.git?rev=2b90b9f5ceec907a1c18123530e92e794ad901a4#2b90b9f5ceec907a1c18123530e92e794ad901a4
@@ -1246,7 +1246,7 @@ packages:
 - pypi: .
   name: annotation-example
   version: 0.1.0
-  sha256: 79f8800a285ab828748a4a4b176a3675d02ebcd5c73d3b7d8d224445f99c0056
+  sha256: a00ed3bb07c5492d064b62bae2269e301dbc0bf9dd44cee253f3a3b70f258c91
   requires_dist:
   - mmcv-lite>=2.2.0,<2.3
   - hf-transfer>=0.1.8,<0.2
@@ -7418,7 +7418,7 @@ packages:
   - pkg:pypi/requests?source=hash-mapping
   size: 58723
   timestamp: 1733217126197
-- pypi: direct+https://github.com/rerun-io/rerun/releases/download/prerelease/rerun_sdk-0.23.0a3+dev-cp38-abi3-manylinux_2_31_x86_64.whl
+- pypi: direct+https://github.com/rerun-io/rerun/releases/download/prerelease/rerun_sdk-0.23.0a3+dev-cp39-abi3-manylinux_2_31_x86_64.whl
   name: rerun-sdk
   version: 0.23.0a3+dev
   requires_dist:
