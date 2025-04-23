@@ -7,7 +7,7 @@ requires-python = ">= 3.10"
 dependencies = [
     "mmcv-lite>=2.2.0,<2.3",
     "hf-transfer>=0.1.8,<0.2",
-    "build>=1.2.2.post1,<2",
+    "build>=1.2.2.post1,<2", "decord>=0.6.0,<0.7",
 ]
 
 [build-system]

@@ -53,7 +53,7 @@ def update_keypoints(
             mv_keypoint_dict[cam_name].add_point(current_keypoint, point_type)
             current_keypoint_container: KeypointsContainer = mv_keypoint_dict[cam_name]
 
-    rec.set_time_nanos(log_paths["timeline_name"], nanos=0)
+    rec.set_time(log_paths["timeline_name"], sequence=0)
     # Log include points if any exist
     if current_keypoint_container.include_points.shape[0] > 0:
         rec.log(
