@@ -33,7 +33,7 @@ This is Linux only with an NVIDIA GPU.
 ```bash
 git clone https://github.com/rerun-io/annotation-example.git
 cd annotation-example
-pixi run example-base
+pixi run app
 ```
 
 All commands can be listed using `pixi task list`
