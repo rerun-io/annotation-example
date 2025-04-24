@@ -18,7 +18,7 @@ from sam2.sam2_image_predictor import SAM2ImagePredictor
 from sam2.sam2_video_predictor import SAM2VideoPredictor
 from simplecv.camera_parameters import PinholeParameters
 from simplecv.conversion_utils import save_to_nerfstudio
-from simplecv.data.exoego.assembly_101 import Assembely101Sequence
+from simplecv.data.exoego.assembly_101 import Assembly101Sequence
 from simplecv.data.exoego.hocap import ExoCameraIDs, HOCapSequence
 from simplecv.ops.triangulate import batch_triangulate, projectN3
 from simplecv.ops.tsdf_depth_fuser import Open3DFuser
@@ -323,7 +323,7 @@ def _triangulate_centers(
     stream = rec.binary_stream()
 
     masks_list: list[UInt8[np.ndarray, "h w"]] = []
-    new_center_xyc_dict: dict[str, Float32[np.ndarray, "3"]] = {}
+    new_center_xyc_dict: dict[str, Float32[np.ndarray, "3"]] = {}  # noqa: UP037
     button_visibility_update = gr.Button(visible=False)
 
     rec.set_time(log_paths["timeline_name"], sequence=0)
@@ -434,7 +434,7 @@ def _log_dataset(dataset_name: Literal["hocap", "assembly101"]):
             )
         case "assembly101":
             # raise NotImplementedError("Assembly101 is not implemented yet.")
-            sequence: Assembely101Sequence = Assembely101Sequence(
+            sequence: Assembly101Sequence = Assembly101Sequence(
                 data_path=Path("data/assembly101-sample"),
                 sequence_name="nusar-2021_action_both_9015-b05b_9015_user_id_2021-02-02_161800",
                 subject_id=None,
@@ -584,7 +584,7 @@ def _propagate_mask(
             )
         case "assembly101":
             # raise NotImplementedError("Assembly101 is not implemented yet.")
-            sequence: Assembely101Sequence = Assembely101Sequence(
+            sequence: Assembly101Sequence = Assembly101Sequence(
                 data_path=Path("data/assembly101-sample"),
                 sequence_name="nusar-2021_action_both_9015-b05b_9015_user_id_2021-02-02_161800",
                 subject_id=None,
@@ -593,8 +593,6 @@ def _propagate_mask(
         case _:
             assert_never(dataset_name)
 
-    exo_video_readers: MultiVideoReader = sequence.exo_video_readers
-    exo_video_files: list[Path] = exo_video_readers.video_paths
     exo_cam_log_paths: list[Path] = [log_paths["parent_log_path"] / exo_cam.name for exo_cam in sequence.exo_cam_list]
     exo_video_log_paths: list[Path] = [cam_log_paths / "pinhole" / "video" for cam_log_paths in exo_cam_log_paths]
 
@@ -617,17 +615,13 @@ def _propagate_mask(
                 rr.Clear(recursive=True),
             )
 
-            points: Float[np.ndarray, "2"] = center_xyc_dict[cam_name][0:2]
+            points: Float[np.ndarray, "2"] = center_xyc_dict[cam_name][0:2]  # noqa: UP037
             points: Float32[np.ndarray, "num_points 2"] = rearrange(points, "uv -> 1 uv").astype(np.float32)
-            labels: Int[np.ndarray, "num_points"] = np.array([1], dtype=np.int32)
+            labels: Int[np.ndarray, "num_points"] = np.array([1], dtype=np.int32)  # noqa: UP037
 
             frame_idx, object_ids, masks = VIDEO_SAM_PREDICTOR.add_new_points_or_box(
                 inference_state, frame_idx=0, obj_id=0, points=points, labels=labels
             )
-
-            frame_idx: int
-            object_ids: list
-            masks: Float32[torch.Tensor, "b 3 h w"]
 
             # Get total number of frames. This might depend on how VIDEO_SAM_PREDICTOR stores it.
             # Assuming it's accessible via inference_state or the predictor object.
@@ -640,9 +634,13 @@ def _propagate_mask(
                 print(f"Warning: Could not determine total frames for {video_path}. Processing all frames.")
                 stop_frame = float("inf")  # Process all frames if count is unknown
 
+            frame_idx: int
+            object_ids: list
+            masks: Float32[torch.Tensor, "b 3 h w"]
+
             masks_list: list[UInt8[np.ndarray, "h w"]] = []
             # propagate the prompts to get masklets throughout the video
-            for frame_idx, object_ids, masks in VIDEO_SAM_PREDICTOR.propagate_in_video(inference_state):
+            for frame_idx, object_ids, masks in VIDEO_SAM_PREDICTOR.propagate_in_video(inference_state):  # noqa: B007
                 # Only process and log up to the midpoint frame
                 if frame_idx < stop_frame:
                     rec.set_time(log_paths["timeline_name"], sequence=frame_idx)
@@ -733,7 +731,7 @@ with gr.Blocks() as mv_sam_block:
                 with gr.Column(scale=1):
                     dataset_dropdown = gr.Dropdown(
                         label="Dataset",
-                        choices=["hocap", "assembly101"],
+                        choices=["hocap"],  # TODO add assembly101
                         value="hocap",
                     )
                     load_dataset_btn = gr.Button("Load Dataset")
