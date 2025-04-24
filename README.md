@@ -53,7 +53,7 @@ pixi run multiview-app
 You can see all tasks by running `pixi task list`
 
 ## Acknowledgements
-Thanks to the original Sam@, and DepthAnything repos!
+Thanks to the original Sam2, and DepthAnything repos!
 
 [SAM2](https://github.com/facebookresearch/sam2)
 ```bibtex
