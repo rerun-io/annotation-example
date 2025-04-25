@@ -516,7 +516,7 @@ environments:
       - pypi: https://files.pythonhosted.org/packages/6a/23/8146aad7d88f4fcb3a6218f41a60f6c2d4e3a72de72da1825dc7c8f7877c/semantic_version-2.10.0-py2.py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/e0/f9/0595336914c5619e5f28a1fb793285925a8cd4b432c9da0a987836c7f822/shellingham-1.5.4-py2.py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/74/03/3271b7bb470fbab4adf5bd30b0d32143909d96f3608d815b447357f47f2b/shtab-1.7.2-py3-none-any.whl
-      - pypi: git+https://github.com/pablovela5620/simplecv.git?rev=83ffa2f9e5b493c05a9dd0ffb2e31f28ed431fe9#83ffa2f9e5b493c05a9dd0ffb2e31f28ed431fe9
+      - pypi: git+https://github.com/pablovela5620/simplecv.git?rev=4b8932dc661ac908afb037bd2f6372684def50b9#4b8932dc661ac908afb037bd2f6372684def50b9
       - pypi: https://files.pythonhosted.org/packages/e9/44/75a9c9421471a6c4805dbf2356f7c181a29c1879239abab1ea2cc8f38b40/sniffio-1.3.1-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/8b/0c/9d30a4ebeb6db2b25a841afbb80f6ef9a854fc3b41be131d249a977b4959/starlette-0.46.2-py3-none-any.whl
       - pypi: https://download.pytorch.org/whl/nightly/sympy-1.13.3-py3-none-any.whl
@@ -1053,7 +1053,7 @@ environments:
       - pypi: https://files.pythonhosted.org/packages/6a/23/8146aad7d88f4fcb3a6218f41a60f6c2d4e3a72de72da1825dc7c8f7877c/semantic_version-2.10.0-py2.py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/e0/f9/0595336914c5619e5f28a1fb793285925a8cd4b432c9da0a987836c7f822/shellingham-1.5.4-py2.py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/74/03/3271b7bb470fbab4adf5bd30b0d32143909d96f3608d815b447357f47f2b/shtab-1.7.2-py3-none-any.whl
-      - pypi: git+https://github.com/pablovela5620/simplecv.git?rev=83ffa2f9e5b493c05a9dd0ffb2e31f28ed431fe9#83ffa2f9e5b493c05a9dd0ffb2e31f28ed431fe9
+      - pypi: git+https://github.com/pablovela5620/simplecv.git?rev=4b8932dc661ac908afb037bd2f6372684def50b9#4b8932dc661ac908afb037bd2f6372684def50b9
       - pypi: https://files.pythonhosted.org/packages/e9/44/75a9c9421471a6c4805dbf2356f7c181a29c1879239abab1ea2cc8f38b40/sniffio-1.3.1-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/fb/6a/a0920c0e67a1cd48b6ce8170c0c172e3ac257400dd0c997ebaa8744b0acb/spaces-0.34.2-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/8b/0c/9d30a4ebeb6db2b25a841afbb80f6ef9a854fc3b41be131d249a977b4959/starlette-0.46.2-py3-none-any.whl
@@ -1248,7 +1248,7 @@ packages:
 - pypi: .
   name: annotation-example
   version: 0.1.0
-  sha256: 866933c85f4f924a4568508328acba57acc3915a4e5a36f65db4bb03b0bfc0ec
+  sha256: bc642df7f5f010b467d5ab894485931eac741452b1e76a6e4609acc81777c351
   requires_dist:
   - mmcv-lite>=2.2.0,<2.3
   - hf-transfer>=0.1.8,<0.2
@@ -7630,7 +7630,7 @@ packages:
   - pytest-cov ; extra == 'dev'
   - pytest-timeout ; extra == 'dev'
   requires_python: '>=3.7'
-- pypi: git+https://github.com/pablovela5620/simplecv.git?rev=83ffa2f9e5b493c05a9dd0ffb2e31f28ed431fe9#83ffa2f9e5b493c05a9dd0ffb2e31f28ed431fe9
+- pypi: git+https://github.com/pablovela5620/simplecv.git?rev=4b8932dc661ac908afb037bd2f6372684def50b9#4b8932dc661ac908afb037bd2f6372684def50b9
   name: simplecv
   version: 0.3.1
   requires_dist:

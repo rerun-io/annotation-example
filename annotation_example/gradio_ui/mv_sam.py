@@ -532,6 +532,7 @@ def handle_export(
     rgb_list: list[UInt8[np.ndarray, "h w 3"]],
     masks_list: list[UInt8[np.ndarray, "h w"]],
     pointcloud: o3d.geometry.PointCloud,
+    masked_pointcloud: o3d.geometry.PointCloud | None,
 ):
     bgr_list: list[UInt8[np.ndarray, "h w 3"]] = [cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR) for rgb in rgb_list]
     ns_save_dir: Path = Path("data/nerfstudio-export")
@@ -540,7 +541,7 @@ def handle_export(
         ns_save_path=ns_save_dir,
         pinhole_param_list=exo_cam_list,
         bgr_list=bgr_list,
-        pointcloud=pointcloud,
+        pointcloud=pointcloud if masked_pointcloud is None else masked_pointcloud,
         masks_list=masks_list,
     )
 
@@ -658,7 +659,7 @@ def _propagate_mask(
                         rr.Image(video_reader[frame_idx], color_model=rr.ColorModel.BGR).compress(jpeg_quality=5),
                     )
 
-                    yield stream.read()
+                    yield stream.read(), None
                 else:
                     # Stop processing this video once the midpoint is reached
                     print(f"Reached midpoint frame {stop_frame} for {video_path}. Stopping propagation logging.")
@@ -673,8 +674,9 @@ def _propagate_mask(
     # Fuse depth images
     fuser = Open3DFuser(fusion_resolution=0.02, max_fusion_depth=1.25)
     rec.log(f"{log_paths['parent_log_path']}/triangulated", rr.Clear(recursive=True))
-    yield stream.read()
+    yield stream.read(), None
 
+    masked_pointcloud = None
     depth_paths: list[dict[str, Path]] | None = sequence.depth_paths
     if depth_paths is not None:
         for idx, depths_dict in enumerate(tqdm(depth_paths, desc="Logging depth images")):
@@ -690,8 +692,12 @@ def _propagate_mask(
                 depth_image: UInt16[np.ndarray, "480 640"] = cv2.imread(str(depth_path), cv2.IMREAD_ANYDEPTH)
                 rgb_hw3 = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
                 masks: UInt8[np.ndarray, "h w"] = masks_dict[exo_cam.name][idx]
-                # update rgb_hw3 with the mask so that the fuser can use it, set the color to blue where mask is 1
-                rgb_hw3[masks == 1] = [0, 0, 255]
+                # mask the depth image with the mask if its the first frame
+                if idx == 0:
+                    depth_image[masks == 0] = 0
+                else:
+                    # update rgb_hw3 with the mask so that the fuser can use it, set the color to blue where mask is 1
+                    rgb_hw3[masks == 1] = [0, 0, 255]
                 fuser.fuse_frames(
                     depth_image,
                     exo_cam.intrinsics.k_matrix,
@@ -700,6 +706,18 @@ def _propagate_mask(
                 )
             mesh: o3d.geometry.TriangleMesh = fuser.get_mesh()
             mesh.compute_vertex_normals()
+
+            # get masked pointcloud only for the first frame
+            if idx == 0:
+                masked_pointcloud: o3d.geometry.PointCloud = mesh.sample_points_poisson_disk(
+                    number_of_points=1_000,
+                )
+                # rec.log(
+                #     f"{log_paths['parent_log_path']}/masked_pointcloud",
+                #     rr.Points3D(masked_pointcloud.points, colors=masked_pointcloud.colors, radii=0.01),
+                #     static=True,
+                # )
+                yield stream.read(), masked_pointcloud
 
             rec.log(
                 f"{log_paths['parent_log_path']}/mesh",
@@ -711,7 +729,7 @@ def _propagate_mask(
                 ),
                 # static=True,
             )
-            yield stream.read()
+            yield stream.read(), masked_pointcloud
     else:
         print("No depth images found.")
 
@@ -722,6 +740,7 @@ with gr.Blocks() as mv_sam_block:
     masks_list: list[UInt8[np.ndarray, "h w"]] | gr.State = gr.State([])
     exo_cam_list: list[PinholeParameters] | gr.State = gr.State([])
     pointcloud: o3d.geometry.PointCloud | gr.State = gr.State()
+    masked_pointcloud: o3d.geometry.PointCloud | gr.State = gr.State()
     centers_xyc_dict: dict[str, Float32[np.ndarray, "3"]] | gr.State = gr.State({})
     video_files: list[Path] | gr.State = gr.State([])
 
@@ -811,12 +830,12 @@ with gr.Blocks() as mv_sam_block:
     # TODO export masks + ply + camera poses for use with brush
     export_btn.click(
         fn=handle_export,
-        inputs=[exo_cam_list, rgb_list, masks_list, pointcloud],
+        inputs=[exo_cam_list, rgb_list, masks_list, pointcloud, masked_pointcloud],
         outputs=[main_tabs, output_zip],
     )
 
     propagate_masks_btn.click(
         fn=propagate_mask,
         inputs=[recording_id, dataset_dropdown, centers_xyc_dict, video_files, log_paths],
-        outputs=[viewer],
+        outputs=[viewer, masked_pointcloud],
     )
