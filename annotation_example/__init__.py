@@ -7,6 +7,7 @@ beartype_this_package(
         claw_skip_package_names=(
             "annotation_example.gradio_ui.mv_sam_callbacks",
             "annotation_example.gradio_ui.sv_sam_callbacks",
+            "annotation_example.gradio_ui.person_annot_callbacks",
         )
     )
 )

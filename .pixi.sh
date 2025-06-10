@@ -1,0 +1,1 @@
+export IMAGES_TO_ANNOTATE_DIR="data/minicoco/"
