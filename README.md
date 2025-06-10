@@ -50,6 +50,16 @@ Multiview mask and triangulation
 pixi run multiview-app
 ```
 
+### Gradio App - Person Keypoint Annotation
+<p align="center">
+  <img src="media/final-label-ui-small.gif" alt="label ui" width="720" />
+</p>
+
+Label all images in folder, to choose your own folder, modify `.pixi.sh` and point to your desired image directory with `IMAGES_TO_ANNOTATE_DIR`
+```bash
+pixi run person-app
+```
+
 You can see all tasks by running `pixi task list`
 
 ## Acknowledgements
