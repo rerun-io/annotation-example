@@ -178,3 +178,19 @@ cython_debug/
 *.egg-info
 
 data/*
+
+
+# START Ruler Generated Files
+/.clinerules
+/.clinerules.bak
+/.codex/config.json
+/.codex/config.json.bak
+/.codex/config.toml
+/.codex/config.toml.bak
+/.github/copilot-instructions.md
+/.github/copilot-instructions.md.bak
+/.vscode/mcp.json
+/.vscode/mcp.json.bak
+/AGENTS.md
+/AGENTS.md.bak
+# END Ruler Generated Files

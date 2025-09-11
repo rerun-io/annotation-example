@@ -8,6 +8,7 @@ dependencies = [
     "mmcv-lite>=2.2.0,<2.3",
     "build>=1.2.2.post1,<2",
     "decord>=0.6.0,<0.7",
+    "gradio==5.33.1",
     "gradio-rerun>=0.23",
     "kornia>=0.8.1,<0.9",
     "onnxruntime-gpu>=1.22.0,<2",
@@ -109,12 +110,6 @@ test -e data/assembly101-sample \
 outputs = ["data/assembly101-sample"]
 description = "Downloads an example assembly101 dataset from huggingface"
 
-[tool.pixi.feature.spaces.tasks.app]
-cmd = """
-    python gradio_app.py
-    """
-description = "Runs Gradio frontend for depth comparison"
-depends-on = ["_install-wheel"]
 
 [tool.pixi.pypi-dependencies]
 annotation_example = { path = ".", editable = true }
@@ -122,20 +117,19 @@ sam-2 = { git = "https://github.com/facebookresearch/segment-anything-2.git", re
 torch = { version = ">=2.7.0", index = "https://download.pytorch.org/whl/cu128" }
 torchvision = { version = ">=0.20.1", index = "https://download.pytorch.org/whl/cu128" }
 torchcodec = { version = ">=0.3", index = "https://download.pytorch.org/whl/cu128" }
-# xformers = { version = ">=0.0.30", index = "https://download.pytorch.org/whl/cu128" }
 vggt = { git = "https://github.com/pablovela5620/vggt.git", rev = "5ed6ec88a951f27959f73bc72eb4b6dc7a028b0c" }
 monopriors = { git = "https://github.com/pablovela5620/monoprior.git", rev = "9a311db1e94eb679b7dacbf7c27dbe8371f40b84" }
-simplecv = { git = "https://github.com/pablovela5620/simplecv.git", rev = "3167089cc328e85440c3acbb442a5f57bab36eac" }
+simplecv = { git = "https://github.com/pablovela5620/simplecv.git", rev = "e523319aa2348dbda4043e9b7e53508ca753ef39" }
 moge = { git = "https://github.com/microsoft/MoGe.git" }
 rtmlib = { git = "https://github.com/pablovela5620/rtmlib.git", rev = "98bca2193c39b349034b280803b54c9ee58f7c68" }
+wilor-nano = { git = "https://github.com/pablovela5620/wilor-nano.git", rev = "c1ed027a8dff05f017aee8f826b7ae456cb1e611" }
 
 
 [tool.pixi.dependencies]
-python = "3.11.*"
-uv = ">=0.3.4,<0.4"
-einops = ">=0.8.0,<0.9"
+python = "3.12.*"
+einops = ">=0.8.0"
 py-opencv = ">=4.11.0,<5"
-transformers = ">=4.50.0,<5"
+transformers = ">=4.50.0"
 setuptools = ">=75.8.2,<76"
 numpy = ">=2"
 ffmpeg = ">=7.1.1,<8"
@@ -144,19 +138,45 @@ jaxtyping = ">=0.2.36,<0.3"
 open3d = ">=0.19.0,<0.20"
 easydict = ">=1.13,<2"
 ninja = ">=1.12.1,<2"
-cuda = "12.8.*"
-cuda-nvcc = "12.8.*"
-cudnn = ">=9.8.0.87,<10"
-rerun-sdk = ">=0.23.2,<0.24"
-hf-transfer = ">=0.1.9,<0.2"
+rerun-sdk = ">=0.24.1"
+hf-transfer = ">=0.1.9"
 h5py = ">=3.14.0,<4"
 
-[tool.pixi.feature.spaces.pypi-dependencies]
-spaces = "==0.34.2"
+
+cuda-compiler = "*"
+cuda-version = "12.8.*"
+cuda-cudart-dev = "*"
+cuda-crt = "*"
+libcusparse-dev = "*"
+cuda-driver-dev = "*"
+cuda-nvcc = "*"
+cuda-nvrtc-dev = "*"
+cuda-nvtx = "*"
+cuda-nvtx-dev = "*"
+cuda-nvml-dev = "*"
+cuda-profiler-api = "*"
+
+# CUDA Libraries
+cudnn = "*"
+libcublas-dev = "*"
+libcudss-dev = "*"
+libcufile-dev = "*"
+libcufft-dev = "*"
+libcurand-dev = "*"
+libcusolver-dev = "*"
+cusparselt = "*"
+libnvjitlink = "*"
+av = ">=15.1.0,<16"
+
+[tool.pixi.feature.dev.dependencies]
+beartype = ">=0.21.0,<0.22"
+ruff = ">=0.12.7,<0.13"
+pytest = ">=8.3.3,<9"
+hypothesis = ">=6.112.1,<7"
 
 
 [tool.pixi.environments]
-spaces = { features = ["spaces"], solve-group = "default" }
+dev = { features = ["dev"], solve-group = "default" }
 
 
 [tool.ruff]
@@ -181,4 +201,6 @@ ignore = [
     "F722",   # Forward annotation false positive from jaxtyping. Should be caught by pyright.
     "F821",   # Forward annotation false positive from jaxtyping. Should be caught by pyright.
     "SIM117", # Use a single `with` statement with multiple contexts instead of nested `with` statements
+    "UP037",  # Remove quotes from type, false positive when using jaxtyping
+
 ]
