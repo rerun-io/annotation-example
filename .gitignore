@@ -178,7 +178,7 @@ cython_debug/
 *.egg-info
 
 data/*
-
+pretrained_models/*
 
 # START Ruler Generated Files
 /.clinerules
