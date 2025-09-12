@@ -26,7 +26,7 @@ class LabelApp:
         # engine_cfg: EngineConfig | None = None,
     ):
         self.engine = Engine()
-        self.ctrl = Controller(app_name=app_name, engine=self.engine)
+        self.ctrl = Controller(engine=self.engine)
         self.control_panel = ControlPanel()
         self.info_panel = InfoPanel()
         self._demo: gr.Blocks | None = None
@@ -37,10 +37,12 @@ class LabelApp:
         with gr.Blocks() as demo, gr.Row():
             with gr.Column(scale=2):
                 with gr.Accordion("Upload Video", open=True) as upload_drawer:
-                    video_upload = gr.Video()
+                    zip_file: gr.File = gr.File(file_types=[".zip"], label="Upload dataset .zip")
+
                     gr.Examples(
-                        examples=[["data/20250908_141953_t265_slam_rrd_0.24.1_left.mp4"], ["data/lg-videos/0.mp4"]],
-                        inputs=[video_upload],
+                        examples=[["../../../personal/mv-api/data/multicam-sample/card-shuffle1.zip"]],
+                        inputs=[zip_file],
+                        cache_examples=False,
                     )
 
                 self.info_panel.build()
@@ -61,13 +63,13 @@ class LabelApp:
         demo.load(self.ctrl.log_state, inputs=[self.state_comp], outputs=[viewer, self.state_comp])
 
         # Collapse the upload accordion when the video changes
-        video_upload.change(
+        zip_file.change(
             fn=lambda _: gr.Accordion(open=False),
-            inputs=[video_upload],
+            inputs=[zip_file],
             outputs=[upload_drawer],
         ).then(
-            fn=self.ctrl.log_video_upload,
-            inputs=[video_upload, self.state_comp],
+            fn=self.ctrl.initialize_rrd,
+            inputs=[zip_file, self.state_comp],
             outputs=[viewer, self.state_comp],
         )
 

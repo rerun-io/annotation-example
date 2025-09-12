@@ -1,6 +1,6 @@
 import tyro
 
-from annotation_example.api.calibrate_mv_videos import CalibrateConfig, calibrate_mv_videos
+from annotation_example.api.calibrate_mv_videos import VGGTInferenceConfig, main
 
 if __name__ == "__main__":
-    calibrate_mv_videos(tyro.cli(CalibrateConfig))
+    main(tyro.cli(VGGTInferenceConfig))

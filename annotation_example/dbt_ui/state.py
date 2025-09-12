@@ -15,6 +15,7 @@ class RerunPaths:
     timeline: str = "video_time"
     info_log_path: Path = Path("info")
     parent_log_path: Path = Path("world")
+    video_log_paths: list[Path] | None = None
 
 
 @dataclass()
