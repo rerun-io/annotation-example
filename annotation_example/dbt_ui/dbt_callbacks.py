@@ -19,7 +19,7 @@ def initial_callback(
 
 
 def track_current_time(state: AppState, evt: TimeUpdate) -> AppState:
-    timestamp_ns = evt.payload.time
+    timestamp_ns: float = evt.payload.time
     # if greater than 1e6 assume it's in nanoseconds and floor
     time_ns: int = int(np.floor(timestamp_ns))
     state: AppState = replace(state, current_time_ns=time_ns)
