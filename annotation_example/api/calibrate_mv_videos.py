@@ -20,12 +20,23 @@ from monopriors.relative_depth_models import (
 from monopriors.relative_depth_models.base_relative_depth import BaseRelativePredictor
 from monopriors.scale_utils import compute_scale_and_shift
 from numpy import ndarray
+from sam2.sam2_image_predictor import SAM2ImagePredictor
 from simplecv.camera_orient_utils import auto_orient_and_center_poses
 from simplecv.camera_parameters import Extrinsics
 from simplecv.ops.conventions import CameraConventions, convert_pose
 from simplecv.rerun_log_utils import RerunTyroConfig, log_pinhole, log_video
 from simplecv.video_io import MultiVideoReader
 from tqdm.auto import trange
+
+try:
+    from sam2.sam2_image_predictor import SAM2ImagePredictor
+except ImportError:
+    SAM2ImagePredictor = None  # type: ignore
+
+try:
+    from rtmlib import YOLOX
+except ImportError:
+    YOLOX = None  # type: ignore
 
 np.set_printoptions(suppress=True)
 
@@ -335,6 +346,32 @@ def mv_pred_to_pointcloud(
     return pointcloud
 
 
+def segment_people(
+    bgr: UInt8[ndarray, "H W 3"],
+    *,
+    det_model: YOLOX,
+    sam_2_predictor: SAM2ImagePredictor,
+    dilation: int = 0,
+) -> Bool[np.ndarray, "h w"] | None:
+    xyxy_bboxes: Float32[ndarray, "n_dets 4"] = det_model(bgr)
+    if len(xyxy_bboxes) == 0:
+        return None
+    # only take the top first bbox
+    xyxy_bboxes = xyxy_bboxes[:1]
+
+    with torch.inference_mode(), torch.autocast("cuda", dtype=torch.bfloat16):
+        sam_2_predictor.set_image(bgr)
+        masks, _, _ = sam_2_predictor.predict(box=xyxy_bboxes, multimask_output=False)
+        masks: Bool[np.ndarray, "h w"] = masks[0] > 0.0
+
+    # Apply dilation to expand the mask boundaries
+    if dilation > 0:
+        kernel = np.ones((dilation, dilation), np.uint8)
+        masks = cv2.dilate(masks.astype(np.uint8), kernel, iterations=1).astype(bool)
+
+    return masks
+
+
 @dataclass
 class VGGTInferenceConfig:
     rr_config: RerunTyroConfig
@@ -414,6 +451,21 @@ def main(config: VGGTInferenceConfig) -> None:
     mv_pred_list: list[MultiviewPred] = vggt_predictor(rgb_list=rgb_list)
     mv_pred_list = orient_mv_pred_list(mv_pred_list)
 
+    det_model = YOLOX(
+        "https://download.openmmlab.com/mmpose/v1/projects/rtmposev1/onnx_sdk/yolox_m_8xb8-300e_humanart-c2c7a14a.zip",
+        model_input_size=(640, 640),
+        backend="onnxruntime",
+        device=device,
+    )
+    sam2_predictor = SAM2ImagePredictor.from_pretrained("facebook/sam2-hiera-large")
+
+    segmask_list: list[Bool[np.ndarray, "H W"]] = []
+    for bgr in bgr_list:
+        people_masks: Bool[ndarray, "H W"] = segment_people(
+            bgr, det_model=det_model, sam_2_predictor=sam2_predictor, dilation=50
+        )
+        segmask_list.append(people_masks)
+
     pointcloud: Float32[ndarray, "num_points 3"] = mv_pred_to_pointcloud(mv_pred_list)
     rgb_stack: UInt8[ndarray, "num_points 3"] = np.concatenate(
         [rearrange(mv_pred.rgb_image, "h w c -> (h w) c") for mv_pred in mv_pred_list]
@@ -424,6 +476,13 @@ def main(config: VGGTInferenceConfig) -> None:
         robust_filter_confidences(mv_pred.confidence_mask, keep_top_percent=config.keep_top_percent)
         for mv_pred in mv_pred_list
     ]
+
+    # update depth_confidences to exclude people, create a totally new list so it doesn't modify the original
+    new_depth_confidences = []
+    for depth_conf, segmask in zip(depth_confidences, segmask_list, strict=True):
+        new_depth_confidences.append(depth_conf * ~segmask)
+
+    # depth_confidences = new_depth_confidences
 
     # new_depth_confidences = depth_confidences
     pc_conf_mask: Bool[ndarray, "num_points"] = np.concatenate(

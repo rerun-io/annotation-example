@@ -1,7 +1,6 @@
 import uuid
 
 import gradio as gr
-import rerun as rr
 from gradio_rerun import Rerun
 
 from annotation_example.dbt_ui.controller import Controller
@@ -11,11 +10,8 @@ from annotation_example.dbt_ui.panels.control_panel import ControlPanel
 from annotation_example.dbt_ui.panels.info_panel import InfoPanel
 from annotation_example.dbt_ui.state import AppState
 
-
-def get_recording(
-    recording_id: uuid.UUID, application_id: str = "Detection By Tracking Annotation"
-) -> rr.RecordingStream:
-    return rr.RecordingStream(application_id=application_id, recording_id=recording_id)
+if gr.NO_RELOAD:
+    engine = Engine()
 
 
 class LabelApp:
@@ -25,7 +21,7 @@ class LabelApp:
         app_name: str = "label_app",
         # engine_cfg: EngineConfig | None = None,
     ):
-        self.engine = Engine()
+        self.engine = engine
         self.ctrl = Controller(engine=self.engine)
         self.control_panel = ControlPanel()
         self.info_panel = InfoPanel()

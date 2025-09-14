@@ -7,6 +7,8 @@ from pathlib import Path
 from typing import Literal
 
 import numpy as np
+from jaxtyping import Int
+from numpy import ndarray
 from wilor_nano.hand_detection import DetectionResult
 
 
@@ -31,10 +33,14 @@ class AppState:
     current_time_ns: int = 0
     current_tab: Literal["Info", "Annotations"] = "Info"
     # Path to the currently loaded video (if any)
-    video_path: Path | None = None
+    video_paths_list: list[Path] | None = None
     # Cached frame timestamps (ns) returned by AssetVideo.read_frame_timestamps_nanos()
     frame_timestamps_ns: np.ndarray | None = None
+    shortest_timestamp_ns: Int[ndarray, "n_frames"] | None = None
     current_prediction: CurrentPrediction | None = None
+    # for running the multiview prediction
+    # mv_det_list: list[DetectionResult] | None = None
+    mv_idx: int = 0  # current index of the multiview video reader
 
 
 class Action(Enum):

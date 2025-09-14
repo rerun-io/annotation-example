@@ -26,9 +26,10 @@ class ControlPanel:
     def wire(self, ctrl: Controller, state: gr.State | AppState, viewer: Rerun) -> None:
         """Wire the control panel with the controller and state."""
         # when we click
-        self.run_bbox.click(fn=ctrl.engine.predict_xyxy, inputs=[state], outputs=[state]).then(
-            fn=ctrl.log_state, inputs=[state], outputs=[viewer, state]
-        )
+        # self.run_bbox.click(fn=ctrl.engine.predict_mv_xyxy, inputs=[state], outputs=[state]).then(
+        #     fn=ctrl.log_state, inputs=[state], outputs=[viewer, state]
+        # )
+        self.run_bbox.click(fn=ctrl.engine.predict_mv_xyxy, inputs=[state], outputs=[viewer, state])
 
         # self.run_kpt.click(
         #     lambda s: ctrl.on_nav(s, Action.NEXT), inputs=[state], outputs=[state], api_name="nav/next"
