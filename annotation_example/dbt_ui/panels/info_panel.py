@@ -11,6 +11,6 @@ class InfoPanel:
         with gr.Column() as self.root:
             gr.Markdown("### Info Panel")
             with gr.Row():
-                gr.Markdown("Ready.")
+                gr.Text("Ready.", interactive=False)
 
         return self

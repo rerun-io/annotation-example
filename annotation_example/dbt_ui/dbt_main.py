@@ -36,13 +36,22 @@ class LabelApp:
                     zip_file: gr.File = gr.File(file_types=[".zip"], label="Upload dataset .zip")
 
                     gr.Examples(
-                        examples=[["../../../personal/mv-api/data/multicam-sample/card-shuffle1.zip"]],
+                        examples=[
+                            ["data/ego-t265-videos.zip"],
+                            ["data/egoexo-cardshuffle1-videos.zip"],
+                            ["data/egoexo-hocap.zip"],
+                            ["data/exo-lg-videos.zip"],
+                            # ["data/exo-lg-videos-trimmed.zip"],
+                        ],
                         inputs=[zip_file],
                         cache_examples=False,
                     )
 
                 self.info_panel.build()
-                self.control_panel.build()
+                with gr.Tab("Run Networks"):
+                    self.control_panel.build()
+                with gr.Tab("Label"):
+                    pass
             with gr.Column(scale=5):
                 viewer = Rerun(
                     streaming=True,
@@ -56,7 +65,11 @@ class LabelApp:
                 viewer.time_update(track_current_time, inputs=[self.state_comp], outputs=[self.state_comp])
 
         # # initial log + status
-        demo.load(self.ctrl.log_state, inputs=[self.state_comp], outputs=[viewer, self.state_comp])
+        demo.load(
+            self.ctrl.log_state,
+            inputs=[self.state_comp],
+            outputs=[viewer, self.state_comp],
+        )
 
         # Collapse the upload accordion when the video changes
         zip_file.change(
@@ -70,7 +83,11 @@ class LabelApp:
         )
 
         # # wire controls
-        self.control_panel.wire(self.ctrl, state=self.state_comp, viewer=viewer)
+        self.control_panel.wire(
+            self.ctrl,
+            state=self.state_comp,
+            viewer=viewer,
+        )
 
         # self._demo = demo
         return demo

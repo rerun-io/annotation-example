@@ -4,33 +4,48 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Literal, assert_never
 
+import cv2
 import gradio as gr
 import numpy as np
 import open3d as o3d
 import rerun as rr
 import rerun.blueprint as rrb
-from jaxtyping import Bool, Float32, Int, UInt8
+from jaxtyping import Float, Int, UInt8
 from natsort import natsorted
 from numpy import ndarray
-from simplecv.rerun_log_utils import log_video
+from simplecv.data.skeleton.mediapipe import MEDIAPIPE_ID2NAME, MEDIAPIPE_LINKS
+from simplecv.rerun_log_utils import log_video, log_pinhole
 from simplecv.video_io import MultiVideoReader
 
 from annotation_example.dbt_ui.engine import Engine, MVCalibResults
 from annotation_example.dbt_ui.recording_utils import get_recording
 from annotation_example.dbt_ui.state import AppState, CurrentPrediction
 
-from wilor_nano.api.wilor_inference import set_annotation_context
 
-
-def get_recording(
-    recording_id: uuid.UUID,
-    application_id: str = "Detection By Tracking Annotation",
-    rrd_path: Path | None = None,
-) -> rr.RecordingStream:
-    recording = rr.RecordingStream(application_id=application_id, recording_id=recording_id)
-    if rrd_path is not None:
-        rr.set_sinks([rr.FileSink(path=rrd_path)], recording=recording)
-    return recording
+def set_annotation_context(recording: rr.RecordingStream) -> None:
+    rr.log(
+        "/",
+        rr.AnnotationContext(
+            [
+                rr.ClassDescription(
+                    info=rr.AnnotationInfo(id=0, label="Left Hand", color=(0, 0, 255)),
+                    keypoint_annotations=[
+                        rr.AnnotationInfo(id=id, label=name) for id, name in MEDIAPIPE_ID2NAME.items()
+                    ],
+                    keypoint_connections=MEDIAPIPE_LINKS,
+                ),
+                rr.ClassDescription(
+                    info=rr.AnnotationInfo(id=1, label="Right Hand", color=(0, 255, 0)),
+                    keypoint_annotations=[
+                        rr.AnnotationInfo(id=id, label=name) for id, name in MEDIAPIPE_ID2NAME.items()
+                    ],
+                    keypoint_connections=MEDIAPIPE_LINKS,
+                ),
+            ]
+        ),
+        static=True,
+        recording=recording,
+    )
 
 
 def create_dbt_blueprint(
@@ -41,15 +56,24 @@ def create_dbt_blueprint(
     # Use a container for the Annotations tab so we can arrange multiple views.
     # NOTE: Tabs.active_tab only matches by name for View children, not Containers.
     #       When the child is a Container, we must select the tab by index instead.
-
     annotation_tab = rrb.Spatial3DView()
-    if state.rr_log_paths.video_log_paths is not None:
-        spatial_2d_views: rrb.Horizontal = rrb.Horizontal(
-            contents=[rrb.Spatial2DView(origin=video_log_path) for video_log_path in state.rr_log_paths.video_log_paths]
+    if state.rr_log_paths.ego_video_log_paths is not None:
+        ego_2d_views: rrb.Vertical = rrb.Vertical(
+            contents=[
+                rrb.Spatial2DView(origin=video_log_path) for video_log_path in state.rr_log_paths.ego_video_log_paths
+            ]
         )
-        annotation_tab = rrb.Vertical(
-            contents=[annotation_tab, spatial_2d_views], name="Annotations", row_shares=[3, 1]
+        annotation_tab = rrb.Horizontal(
+            contents=[annotation_tab, ego_2d_views], name="Annotations", column_shares=[3, 1]
         )
+
+    if state.rr_log_paths.exo_video_log_paths is not None:
+        exo_2d_views: rrb.Horizontal = rrb.Horizontal(
+            contents=[
+                rrb.Spatial2DView(origin=video_log_path) for video_log_path in state.rr_log_paths.exo_video_log_paths
+            ]
+        )
+        annotation_tab = rrb.Vertical(contents=[annotation_tab, exo_2d_views], name="Annotations", row_shares=[3, 1])
 
     # Map requested tab name to index to support container child. If using directly it will fail to match.
     match active_tab:
@@ -146,30 +170,76 @@ class Controller:
     def initialize_rrd(self, video, state):
         yield from self._initialize_rrd(video, state)
 
-    def _initialize_rrd(self, zip_path: str | None, state: gr.State | AppState, progress=gr.Progress()):
+    def _initialize_rrd(self, zip_path: str | None, state: gr.State | AppState):
         # switch to Annotations tab on video upload
         self.tab_name = "Annotations"
-        set_annotation_context()
+        recording: rr.RecordingStream = get_recording(state.recording_id)
+        stream: rr.BinaryStream = recording.binary_stream()
+        set_annotation_context(recording=recording)
+
         if zip_path is None:
             # create a new recording id to clear out any previous video state
-            state: AppState = replace(state, recording_id=uuid.uuid4(), video_paths_list=None)
+            state = AppState(recording_id=uuid.uuid4())
+            # remove video readers from the engine
+            self.engine.ego_mv_reader = None
+            self.engine.exo_mv_reader = None
             yield None, state
             return
+
         zip_path = Path(zip_path)
         videos_dir: Path = _extract_zip_to_videos_dir(zip_path)
-        assert videos_dir.exists(), f"Video path {videos_dir} does not exist!"
-        # make sure that we have videos in the directory
-        video_path_list: list[Path] = natsorted(videos_dir.glob("*.mp4"))
-        assert len(video_path_list) > 0, "No videos found in uploaded zip"
-        recording: rr.RecordingStream = get_recording(state.recording_id)
+        # get the subfolers of videos dir
+        subfolders: list[Path] = [f for f in videos_dir.iterdir() if f.is_dir()]
+        # Check for presence of 'ego' or 'exo' subfolders
+        ego_present: bool = any(f.name == "ego" for f in subfolders)
+        exo_present: bool = any(f.name == "exo" for f in subfolders)
 
-        progress(0, desc="Starting...")
+        if not (ego_present or exo_present):
+            raise gr.Error("The uploaded zip must contain 'ego' and/or 'exo' subfolders with videos.")
 
-        exo_timestamps: list[Int[ndarray, "num_frames"]] = []
+        timeline_candidates: list[Int[ndarray, "num_frames"]] = []
+        if ego_present:
+            result: tuple[AppState, list[Int[ndarray, "num_frames"]]] = self._log_video_group(
+                group="ego", videos_dir=videos_dir, state=state, recording=recording
+            )
+            state, ego_timestamps = result
+            timeline_candidates.extend(ego_timestamps)
+        if exo_present:
+            result: tuple[AppState, list[Int[ndarray, "num_frames"]]] = self._log_video_group(
+                group="exo", videos_dir=videos_dir, state=state, recording=recording
+            )
+            state, exo_timestamps = result
+            timeline_candidates.extend(exo_timestamps)
+
+        # check for the shortest video timestamps to use as the main timeline
+        shortest_timestamps: Int[ndarray, "n_frames"] = min(timeline_candidates, key=len)
+        state: AppState = replace(state, shortest_timestamps=shortest_timestamps)
+
+        blueprint: rrb.Blueprint = create_dbt_blueprint(recording, state, active_tab=self.tab_name)
+        rr.send_blueprint(blueprint, recording=recording)
+
+        yield stream.read(), state
+
+    def _log_video_group(
+        self,
+        *,
+        group: Literal["ego", "exo"],
+        videos_dir: Path,
+        state: AppState,
+        recording: rr.RecordingStream,
+    ) -> tuple[AppState, list[Int[ndarray, "num_frames"]]]:
+        group_dir: Path = videos_dir / group
+        if not group_dir.exists():
+            raise gr.Error(f"Video path {group_dir} does not exist!")
+
+        video_paths: list[Path] = list(natsorted(group_dir.glob("*.mp4")))
+        if not video_paths:
+            raise gr.Error("No videos found in uploaded zip")
+
         video_log_paths: list[Path] = []
-        video_paths_list: list[Path] = []
-        for i, video_path in enumerate(video_path_list):
-            video_log_path: Path = state.rr_log_paths.parent_log_path / f"camera_{i}" / "pinhole" / "video"
+        timestamps_list: list[Int[ndarray, "num_frames"]] = []
+        for index, video_path in enumerate(video_paths):
+            video_log_path: Path = state.rr_log_paths.parent_log_path / group / f"camera_{index}" / "pinhole" / "video"
             frame_timestamps_ns: Int[ndarray, "num_frames"] = log_video(
                 video_path=video_path,
                 video_log_path=video_log_path,
@@ -177,21 +247,43 @@ class Controller:
                 recording=recording,
             )
             video_log_paths.append(video_log_path)
-            video_paths_list.append(video_path)
-            exo_timestamps.append(frame_timestamps_ns)
+            timestamps_list.append(frame_timestamps_ns)
 
-        shortest_timestamp: Int[ndarray, "n_frames"] = min(exo_timestamps, key=len)
+        log_path_update: dict[str, list[Path]] = {f"{group}_video_log_paths": video_log_paths}
+        state: AppState = replace(state, rr_log_paths=replace(state.rr_log_paths, **log_path_update))
 
-        mv_reader = MultiVideoReader(video_path_list)
-        self.engine.mv_reader = mv_reader  # cache for later use
-        ts_idx: int = 0
-        bgr_list: list[UInt8[ndarray, "H W 3"]] = mv_reader[ts_idx]
-        rgb_list: list[UInt8[ndarray, "H W 3"]] = [bgr[..., ::-1] for bgr in bgr_list]
-        mv_result: MVCalibResults = self.engine.calibrate_mv(state, rgb_list)
-        pcd_ds: o3d.geometry.PointCloud = mv_result.pcd
+        mv_reader: MultiVideoReader = MultiVideoReader(video_paths)
+        setattr(self.engine, f"{group}_mv_reader", mv_reader)
+
+        return state, timestamps_list
+
+    def log_calibration_results(
+        self,
+        state,
+        progress=gr.Progress(track_tqdm=True),
+    ):
+        yield from self._log_calibration_results(state, progress)
+
+    def _log_calibration_results(
+        self,
+        state: gr.State | AppState,
+        progress: gr.Progress,
+    ):
+        recording: rr.RecordingStream = get_recording(state.recording_id)
+        stream: rr.BinaryStream = recording.binary_stream()
+
+        progress(0.0, desc="Starting multiview calibration…")
+
+        bgr_list: list[UInt8[ndarray, "H W 3"]] = self.engine.exo_mv_reader[0]
+        rgb_list: list[UInt8[ndarray, "H W 3"]] = [cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB) for bgr in bgr_list]
+        mv_results: MVCalibResults = self.engine.calibrate_mv(state=state, rgb_list=rgb_list)
+
+        progress(0.5, desc="Logging calibration results…")
+
+        pcd_ds: o3d.geometry.PointCloud = mv_results.pcd
         # log the pointcloud
-        filtered_points: Float32[ndarray, "final_points 3"] = np.asarray(pcd_ds.points, dtype=np.float32)
-        filtered_colors: Float32[ndarray, "final_points 3"] = np.asarray(pcd_ds.colors, dtype=np.float32)
+        filtered_points: Float[ndarray, "final_points 3"] = np.asarray(pcd_ds.points, dtype=np.float32)
+        filtered_colors: Float[ndarray, "final_points 3"] = np.asarray(pcd_ds.colors, dtype=np.float32)
 
         rr.log(
             f"{state.rr_log_paths.parent_log_path}/point_cloud",
@@ -203,21 +295,24 @@ class Controller:
             recording=recording,
         )
 
-        # update rr_paths in state
-        rr_log_paths = state.rr_log_paths
-        rr_log_paths.video_log_paths = video_log_paths
-        state = replace(state, rr_log_paths=rr_log_paths)
+        # log the cameras
+        video_log_paths = state.rr_log_paths.exo_video_log_paths
+        cam_log_paths: list[Path] = [video_log_path.parent.parent for video_log_path in video_log_paths]
+        for pinhole_param, cam_log_path in zip(mv_results.pinhole_param_list, cam_log_paths, strict=True):
+            log_pinhole(
+                pinhole_param,
+                cam_log_path=cam_log_path,
+                static=True,
+                image_plane_distance=0.1,
+                recording=recording,
+            )
+        # update the current prediction with the pinhole params
+        if state.current_prediction is not None:
+            raise gr.Error("Current prediction should be None before calibration.")
+        current_pred: CurrentPrediction = CurrentPrediction(pinhole_params_list=mv_results.pinhole_param_list)
+        state = replace(state, current_prediction=current_pred)
 
-        blueprint: rrb.Blueprint = create_dbt_blueprint(recording, state, active_tab=self.tab_name)
-        rr.send_blueprint(blueprint, recording=recording)
-
-        # # Update state immutably with video path & frame timestamps
-        new_state: AppState = replace(
-            state,
-            video_paths_list=video_paths_list,
-            frame_timestamps_ns=shortest_timestamp,
-        )
-        yield recording.binary_stream().read(), new_state
+        yield stream.read(), state
 
     # def on_nav(self, state: AppState, kind: Action) -> AppState:
     #     """Handle navigation events."""

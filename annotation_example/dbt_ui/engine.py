@@ -1,13 +1,13 @@
 from dataclasses import replace
 from pathlib import Path
-from typing import NamedTuple
+from typing import Literal, NamedTuple
 
 import cv2
 import numpy as np
 import open3d as o3d
 import rerun as rr
 from einops import rearrange
-from jaxtyping import Bool, Float32, UInt8
+from jaxtyping import Bool, Float, Float32, Int, UInt8
 from monopriors.multiview_models.vggt_model import MultiviewPred, VGGTPredictor, robust_filter_confidences
 from monopriors.relative_depth_models import (
     RelativeDepthPrediction,
@@ -17,10 +17,16 @@ from monopriors.relative_depth_models.base_relative_depth import BaseRelativePre
 from numpy import ndarray
 from simplecv.camera_parameters import PinholeParameters
 from simplecv.data.skeleton.mediapipe import MEDIAPIPE_IDS
+from simplecv.rerun_log_utils import Points2DWithConfidence, confidence_scores_to_rgb
 from simplecv.video_io import MultiVideoReader
 from tqdm import tqdm
 from wilor_nano.hand_detection import DetectionResult, HandDetector, HandDetectorConfig
-from wilor_nano.hand_keypoints import FinalWilorPred, HandKeypointDetectorConfig, WilorHandKeypointDetector
+from wilor_nano.hand_keypoints import (
+    FinalWilorPred,
+    HandKeypointDetectorConfig,
+    RTMPoseHandKeypointDetector,
+    WilorHandKeypointDetector,
+)
 
 from annotation_example.api.calibrate_mv_videos import (
     compute_scale_and_shift,
@@ -71,11 +77,8 @@ class MultiViewCalibrator:
 
     def __call__(
         self,
-        state: AppState,
         rgb_list: list[UInt8[ndarray, "H W 3"]],
     ) -> MVCalibResults:
-        parent_log_path: Path = state.rr_log_paths.parent_log_path
-
         mv_pred_list: list[MultiviewPred] = self.vggt_predictor(rgb_list)
         mv_pred_list: list[MultiviewPred] = orient_mv_pred_list(mv_pred_list)
 
@@ -83,7 +86,7 @@ class MultiViewCalibrator:
         # but do not alter confidences/depth with it here.
         segmask_list: list[Bool[np.ndarray, "H W"] | None] = []
         for rgb in rgb_list:
-            bgr: UInt8[ndarray, "H W 3"] = rgb[..., ::-1]
+            bgr: UInt8[ndarray, "H W 3"] = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
             people_masks: Bool[ndarray, "H W"] | None = segment_people(
                 bgr, det_model=self.det_model, sam_2_predictor=self.sam2_predictor, dilation=50
             )
@@ -125,7 +128,6 @@ class MultiViewCalibrator:
         voxel_size: float = estimate_voxel_size(filtered_points_pre_ds, target_points=200_000)
         pcd_ds: o3d.geometry.PointCloud = pcd.voxel_down_sample(voxel_size)
 
-        print(f"parent_log_path: {parent_log_path}")
         if self.refine_depth_maps:
             refined_depths_list: list[Float32[ndarray, "H W"]] = []
 
@@ -180,6 +182,12 @@ class MultiViewCalibrator:
         return mv_calib_results
 
 
+HAND_CONFIDENCE: float = 0.3
+HAND_COLOR: tuple[int, int, int] = (255, 0, 0)
+Handedness = Literal["left", "right"]
+HAND_CLASS_IDS: dict[Handedness, int] = {"left": 0, "right": 1}
+
+
 class Engine:
     """Used to hold neural network engines."""
 
@@ -187,20 +195,97 @@ class Engine:
         self,
     ):
         self.hand_detection_engine = HandDetector(HandDetectorConfig(verbose=False))
-        self.hand_keypoint_engine = WilorHandKeypointDetector(HandKeypointDetectorConfig(verbose=False))
-        self._mv_reader: MultiVideoReader | None = None
+        # self.hand_keypoint_engine = WilorHandKeypointDetector(HandKeypointDetectorConfig(verbose=False))
+        self.hand_keypoint_engine = RTMPoseHandKeypointDetector(HandKeypointDetectorConfig(verbose=False))
         self.mv_calibrator = MultiViewCalibrator()
+        self._ego_mv_reader: MultiVideoReader | None = None
+        self._exo_mv_reader: MultiVideoReader | None = None
 
     @property
-    def mv_reader(self) -> MultiVideoReader | None:
-        return self._mv_reader
+    def exo_mv_reader(self) -> MultiVideoReader | None:
+        return self._exo_mv_reader
 
-    @mv_reader.setter
-    def mv_reader(self, value: MultiVideoReader | None) -> None:
-        self._mv_reader = value
+    @exo_mv_reader.setter
+    def exo_mv_reader(self, value: MultiVideoReader | None) -> None:
+        self._exo_mv_reader = value
 
-    def calibrate_mv(self, state: AppState, rgb_list: list[UInt8[ndarray, "H W 3"]]) -> MVCalibResults:
-        return self.mv_calibrator(state, rgb_list)
+    @property
+    def ego_mv_reader(self) -> MultiVideoReader | None:
+        return self._ego_mv_reader
+
+    @ego_mv_reader.setter
+    def ego_mv_reader(self, value: MultiVideoReader | None) -> None:
+        self._ego_mv_reader = value
+
+    def _log_hand_prediction(
+        self,
+        *,
+        recording: rr.RecordingStream,
+        video_log_path: Path,
+        hand: Handedness,
+        rgb_hw3: UInt8[ndarray, "h w 3"],
+        xyxy: Float[ndarray, "1 4"] | None,
+    ) -> None:
+        hand_path: Path = video_log_path / hand
+        if xyxy is None:
+            rr.log(f"{hand_path}_xyxy", rr.Clear(recursive=True), recording=recording)
+            rr.log(f"{hand_path}_keypoints", rr.Clear(recursive=True), recording=recording)
+            return
+
+        xyxy_list: list[list[float]] = xyxy.tolist()
+        kpts_results: tuple[
+            Float[ndarray, "n_frames=1 n_kpts=21 2"],
+            Float[ndarray, "n_frames=1 n_kpts=21"],
+        ] = self.hand_keypoint_engine(image=rgb_hw3, xyxy=xyxy_list)
+        uv: Float[ndarray, "n_frames=1 n_kpts=21 2"] = kpts_results[0]
+        conf: Float[ndarray, "n_frames=1 n_kpts=21"] = kpts_results[1]
+        conf_colors: UInt8[ndarray, "n_frames=1 n_kpts=21 3"] = confidence_scores_to_rgb(
+            confidence_scores=conf[..., np.newaxis]
+        )
+        class_id: int = HAND_CLASS_IDS[hand]
+
+        rr.log(
+            f"{hand_path}_xyxy",
+            rr.Boxes2D(array=xyxy, array_format=rr.Box2DFormat.XYXY, class_ids=class_id),
+            recording=recording,
+        )
+        rr.log(
+            f"{hand_path}_keypoints",
+            rr.Points2D(
+                positions=uv[0],
+                # confidences=conf[0],
+                class_ids=class_id,
+                keypoint_ids=MEDIAPIPE_IDS,
+                show_labels=False,
+                colors=conf_colors[0],
+            ),
+            recording=recording,
+        )
+
+    def _process_video_reader(
+        self,
+        *,
+        bgr_frames: list[UInt8[ndarray, "h w 3"]],
+        video_log_paths: list[Path],
+        recording: rr.RecordingStream,
+    ) -> None:
+        for bgr, video_log_path in zip(bgr_frames, video_log_paths, strict=True):
+            rgb_hw3: UInt8[ndarray, "h w 3"] = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
+            det_result: DetectionResult = self.hand_detection_engine(rgb_hw3=rgb_hw3, hand_conf=HAND_CONFIDENCE)
+            self._log_hand_prediction(
+                recording=recording,
+                video_log_path=video_log_path,
+                hand="right",
+                rgb_hw3=rgb_hw3,
+                xyxy=det_result.right_xyxy,
+            )
+            self._log_hand_prediction(
+                recording=recording,
+                video_log_path=video_log_path,
+                hand="left",
+                rgb_hw3=rgb_hw3,
+                xyxy=det_result.left_xyxy,
+            )
 
     def predict_xyxy(self, state: AppState) -> AppState:
         # Convert current_time_ns to frame index using the logged frame timestamps.
@@ -210,9 +295,9 @@ class Engine:
         frame_idx: int = time_to_frame_idx(state.current_time_ns, state.frame_timestamps_ns)
 
         # Read frame from the underlying video using MultiVideoReader (BGR)
-        if self.mv_reader is None or self.mv_reader.video_paths != [state.video_paths_list]:
-            self.mv_reader = MultiVideoReader([state.video_paths_list])
-        bgr_frame = self.mv_reader[frame_idx][0]
+        if self.ego_mv_reader is None or self.ego_mv_reader.video_paths != [state.video_paths_list]:
+            self.ego_mv_reader = MultiVideoReader([state.video_paths_list])
+        bgr_frame = self.ego_mv_reader[frame_idx][0]
         rgb_hw3: UInt8[ndarray, "h w 3"] = cv2.cvtColor(bgr_frame, cv2.COLOR_BGR2RGB)
 
         # Run your model on the current frame (example placeholder)
@@ -231,76 +316,34 @@ class Engine:
 
     def _predict_mv_xyxy(self, state: AppState):
         recording: rr.RecordingStream = get_recording(state.recording_id)
-        for ts_idx, ts in tqdm(enumerate(state.frame_timestamps_ns)):
+        if state.rrd_save_path is not None:
+            recording.save(state.rrd_save_path)
+            print(f"[Rerun] Logging to {state.rrd_save_path}")
+        stream: rr.BinaryStream = recording.binary_stream()
+        time_ns: Int[ndarray, "n_frames"] = state.shortest_timestamps
+
+        for ts_idx, ts in tqdm(enumerate(time_ns), total=len(time_ns), desc="Processing frames"):
             rr.set_time(state.rr_log_paths.timeline, duration=ts * 1e-9, recording=recording)
-            bgr_list = self.mv_reader[ts_idx]
-            for bgr, video_log_path in zip(bgr_list, state.rr_log_paths.video_log_paths, strict=True):
-                rgb_hw3: UInt8[ndarray, "h w 3"] = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
+            if self.ego_mv_reader is not None:
+                ego_bgr_list: list[UInt8[ndarray, "h w 3"]] = self.ego_mv_reader[ts_idx]
+                self._process_video_reader(
+                    bgr_frames=ego_bgr_list,
+                    video_log_paths=state.rr_log_paths.ego_video_log_paths,
+                    recording=recording,
+                )
+                yield stream.read(), state
 
-                # Run your model on the current frame (example placeholder)
-                det_result: DetectionResult = self.hand_detection_engine(rgb_hw3=rgb_hw3, hand_conf=0.3)
+            if self.exo_mv_reader is not None:
+                exo_bgr_list: list[UInt8[ndarray, "h w 3"]] = self.exo_mv_reader[ts_idx]
+                self._process_video_reader(
+                    bgr_frames=exo_bgr_list,
+                    video_log_paths=state.rr_log_paths.exo_video_log_paths,
+                    recording=recording,
+                )
+                yield stream.read(), state
 
-                if det_result.right_xyxy is not None:
-                    right_xyxy = det_result.right_xyxy
-                    kpts_results: FinalWilorPred = self.hand_keypoint_engine(
-                        rgb_hw3=rgb_hw3, xyxy=right_xyxy, handedness="right"
-                    )
-                    rr.log(
-                        f"{video_log_path}/right_xyxy",
-                        rr.Boxes2D(array=right_xyxy, array_format=rr.Box2DFormat.XYXY),
-                        recording=recording,
-                    )
-                    rr.log(
-                        f"{video_log_path}/right_keypoints",
-                        rr.Points2D(
-                            positions=kpts_results.pred_keypoints_2d[0],
-                            class_ids=0,
-                            keypoint_ids=MEDIAPIPE_IDS,
-                            show_labels=False,
-                            colors=(0, 255, 0),
-                        ),
-                        recording=recording,
-                    )
-                else:
-                    rr.log(
-                        f"{video_log_path}/right_xyxy",
-                        rr.Clear(recursive=True),
-                        recording=recording,
-                    )
-                    rr.log(
-                        f"{video_log_path}/right_keypoints",
-                        rr.Clear(recursive=True),
-                        recording=recording,
-                    )
-
-                if det_result.left_xyxy is not None:
-                    left_xyxy = det_result.left_xyxy
-                    kpts_results: FinalWilorPred = self.hand_keypoint_engine(
-                        rgb_hw3=rgb_hw3, xyxy=left_xyxy, handedness="left"
-                    )
-                    rr.log(
-                        f"{video_log_path}/left_xyxy",
-                        rr.Boxes2D(array=left_xyxy, array_format=rr.Box2DFormat.XYXY),
-                        recording=recording,
-                    )
-                    rr.log(
-                        f"{video_log_path}/left_keypoints",
-                        rr.Points2D(
-                            positions=kpts_results.pred_keypoints_2d[0],
-                            class_ids=0,
-                            keypoint_ids=MEDIAPIPE_IDS,
-                            show_labels=False,
-                            colors=(0, 255, 0),
-                        ),
-                        recording=recording,
-                    )
-                else:
-                    rr.log(
-                        f"{video_log_path}/left_xyxy",
-                        rr.Clear(recursive=True),
-                        recording=recording,
-                    )
-        yield recording.binary_stream().read(), state
+    def calibrate_mv(self, state: AppState, rgb_list: list[UInt8[ndarray, "H W 3"]]) -> MVCalibResults:
+        return self.mv_calibrator(rgb_list)
 
 
 def time_to_frame_idx(time_ns: int, frame_timestamps_ns: np.ndarray) -> int:

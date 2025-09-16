@@ -10,37 +10,63 @@ import numpy as np
 from jaxtyping import Int
 from numpy import ndarray
 from wilor_nano.hand_detection import DetectionResult
+from simplecv.camera_parameters import PinholeParameters
 
 
 @dataclass
 class RerunPaths:
+    """Container for common Rerun entity paths used across the UI."""
+
     timeline: str = "video_time"
+    """Timeline name used when logging time-series data into Rerun."""
+
     info_log_path: Path = Path("info")
+    """Entity path for metadata and text logs."""
+
     parent_log_path: Path = Path("world")
-    video_log_paths: list[Path] | None = None
+    """Root entity under which new logs should be created."""
+
+    ego_video_log_paths: list[Path] | None = None
+    """Optional list of Rerun entities containing ego-vision video streams."""
+
+    exo_video_log_paths: list[Path] | None = None
+    """Optional list of Rerun entities containing exo-vision video streams."""
 
 
 @dataclass()
 class CurrentPrediction:
+    """Latest detection results returned by the inference engine."""
+
+    pinhole_params_list: list[PinholeParameters] | None = None
+
     detection_results: DetectionResult | None = None
+    """Collection of detections for the current frame, if available."""
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True)
 class AppState:
+    """Immutable top-level UI state shared between callbacks and panels."""
+
     recording_id: uuid.UUID
+    """Unique identifier for the active Rerun recording."""
+
     rr_log_paths: RerunPaths = field(default_factory=RerunPaths)
+    """Pre-configured Rerun paths to reuse while logging."""
+
     rrd_save_path: Path | None = None
+    """Location where the generated RRD recording should be stored."""
+
     current_time_ns: int = 0
+    """Current playback timestamp in nanoseconds."""
+
     current_tab: Literal["Info", "Annotations"] = "Info"
-    # Path to the currently loaded video (if any)
-    video_paths_list: list[Path] | None = None
-    # Cached frame timestamps (ns) returned by AssetVideo.read_frame_timestamps_nanos()
-    frame_timestamps_ns: np.ndarray | None = None
-    shortest_timestamp_ns: Int[ndarray, "n_frames"] | None = None
+    """Active UI tab, used to control panel visibility."""
+
+    shortest_timestamps: Int[ndarray, "n_frames"] | None = None
+    """Per-frame timestamps shared across views, shortened for alignment."""
+
     current_prediction: CurrentPrediction | None = None
-    # for running the multiview prediction
-    # mv_det_list: list[DetectionResult] | None = None
-    mv_idx: int = 0  # current index of the multiview video reader
+    """Prediction data for the frame currently shown to the user."""
 
 
 class Action(Enum):
