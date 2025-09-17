@@ -217,12 +217,12 @@ class Engine:
         self,
         *,
         recording: rr.RecordingStream,
-        video_log_path: Path,
+        pinhole_log_path: Path,
         hand: Handedness,
         rgb_hw3: UInt8[ndarray, "h w 3"],
         xyxy: Float[ndarray, "1 4"] | None,
     ) -> Float[np.ndarray, "n_kpts 3"] | None:
-        hand_path: Path = video_log_path / hand
+        hand_path: Path = pinhole_log_path / hand
         if xyxy is None:
             rr.log(f"{hand_path}_xyxy", rr.Clear(recursive=True), recording=recording)
             rr.log(f"{hand_path}_keypoints", rr.Clear(recursive=True), recording=recording)
@@ -277,16 +277,17 @@ class Engine:
         for bgr, video_log_path in zip(bgr_frames, video_log_paths, strict=True):
             rgb_hw3: UInt8[ndarray, "h w 3"] = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
             det_result: DetectionResult = self.hand_detection_engine(rgb_hw3=rgb_hw3, hand_conf=HAND_CONFIDENCE)
+            pinhole_log_path: Path = video_log_path.parent
             right_uv_conf: Float[np.ndarray, "n_kpts 3"] | None = self._log_hand_prediction(
                 recording=recording,
-                video_log_path=video_log_path,
+                pinhole_log_path=pinhole_log_path,
                 hand="right",
                 rgb_hw3=rgb_hw3,
                 xyxy=det_result.right_xyxy,
             )
             left_uv_conf: Float[np.ndarray, "n_kpts 3"] | None = self._log_hand_prediction(
                 recording=recording,
-                video_log_path=video_log_path,
+                pinhole_log_path=pinhole_log_path,
                 hand="left",
                 rgb_hw3=rgb_hw3,
                 xyxy=det_result.left_xyxy,

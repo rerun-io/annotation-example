@@ -62,7 +62,8 @@ def create_dbt_blueprint(
     if state.rr_log_paths.ego_video_log_paths is not None:
         ego_2d_views: rrb.Vertical = rrb.Vertical(
             contents=[
-                rrb.Spatial2DView(origin=video_log_path) for video_log_path in state.rr_log_paths.ego_video_log_paths
+                rrb.Spatial2DView(origin=video_log_path.parent)
+                for video_log_path in state.rr_log_paths.ego_video_log_paths
             ]
         )
         annotation_tab = rrb.Horizontal(
@@ -72,7 +73,8 @@ def create_dbt_blueprint(
     if state.rr_log_paths.exo_video_log_paths is not None:
         exo_2d_views: rrb.Horizontal = rrb.Horizontal(
             contents=[
-                rrb.Spatial2DView(origin=video_log_path) for video_log_path in state.rr_log_paths.exo_video_log_paths
+                rrb.Spatial2DView(origin=video_log_path.parent)
+                for video_log_path in state.rr_log_paths.exo_video_log_paths
             ]
         )
         annotation_tab = rrb.Vertical(contents=[annotation_tab, exo_2d_views], name="Annotations", row_shares=[3, 1])
