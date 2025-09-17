@@ -17,16 +17,12 @@ from monopriors.relative_depth_models.base_relative_depth import BaseRelativePre
 from numpy import ndarray
 from simplecv.camera_parameters import PinholeParameters
 from simplecv.data.skeleton.mediapipe import MEDIAPIPE_IDS
-from simplecv.rerun_log_utils import Points2DWithConfidence, confidence_scores_to_rgb
+from simplecv.ops.triangulate import batch_triangulate
+from simplecv.rerun_log_utils import confidence_scores_to_rgb
 from simplecv.video_io import MultiVideoReader
 from tqdm import tqdm
 from wilor_nano.hand_detection import DetectionResult, HandDetector, HandDetectorConfig
-from wilor_nano.hand_keypoints import (
-    FinalWilorPred,
-    HandKeypointDetectorConfig,
-    RTMPoseHandKeypointDetector,
-    WilorHandKeypointDetector,
-)
+from wilor_nano.hand_keypoints import HandKeypointDetectorConfig, RTMPoseHandKeypointDetector
 
 from annotation_example.api.calibrate_mv_videos import (
     compute_scale_and_shift,
@@ -183,9 +179,9 @@ class MultiViewCalibrator:
 
 
 HAND_CONFIDENCE: float = 0.3
-HAND_COLOR: tuple[int, int, int] = (255, 0, 0)
 Handedness = Literal["left", "right"]
 HAND_CLASS_IDS: dict[Handedness, int] = {"left": 0, "right": 1}
+KEYPOINT_CONFIDENCE_THRESHOLD: float = 0.25
 
 
 class Engine:
@@ -225,12 +221,12 @@ class Engine:
         hand: Handedness,
         rgb_hw3: UInt8[ndarray, "h w 3"],
         xyxy: Float[ndarray, "1 4"] | None,
-    ) -> None:
+    ) -> Float[np.ndarray, "n_kpts 3"] | None:
         hand_path: Path = video_log_path / hand
         if xyxy is None:
             rr.log(f"{hand_path}_xyxy", rr.Clear(recursive=True), recording=recording)
             rr.log(f"{hand_path}_keypoints", rr.Clear(recursive=True), recording=recording)
-            return
+            return None
 
         xyxy_list: list[list[float]] = xyxy.tolist()
         kpts_results: tuple[
@@ -246,7 +242,7 @@ class Engine:
 
         rr.log(
             f"{hand_path}_xyxy",
-            rr.Boxes2D(array=xyxy, array_format=rr.Box2DFormat.XYXY, class_ids=class_id),
+            rr.Boxes2D(array=xyxy, array_format=rr.Box2DFormat.XYXY, class_ids=class_id, show_labels=False),
             recording=recording,
         )
         rr.log(
@@ -261,6 +257,13 @@ class Engine:
             ),
             recording=recording,
         )
+        conf_values: Float[np.ndarray, "n_kpts"] = conf[0].astype(np.float32)
+        conf_values = np.where(conf_values >= KEYPOINT_CONFIDENCE_THRESHOLD, conf_values, 0.0)
+        uv_conf: Float[np.ndarray, "n_kpts 3"] = np.concatenate(
+            (uv[0], conf_values[..., np.newaxis]),
+            axis=-1,
+        ).astype(np.float32)
+        return uv_conf
 
     def _process_video_reader(
         self,
@@ -268,23 +271,110 @@ class Engine:
         bgr_frames: list[UInt8[ndarray, "h w 3"]],
         video_log_paths: list[Path],
         recording: rr.RecordingStream,
-    ) -> None:
+        collect_keypoints: bool = False,
+    ) -> dict[Path, dict[Handedness, Float[np.ndarray, "n_kpts 3"]]]:
+        collected: dict[Path, dict[Handedness, Float[np.ndarray, "n_kpts 3"]]] = {}
         for bgr, video_log_path in zip(bgr_frames, video_log_paths, strict=True):
             rgb_hw3: UInt8[ndarray, "h w 3"] = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
             det_result: DetectionResult = self.hand_detection_engine(rgb_hw3=rgb_hw3, hand_conf=HAND_CONFIDENCE)
-            self._log_hand_prediction(
+            right_uv_conf: Float[np.ndarray, "n_kpts 3"] | None = self._log_hand_prediction(
                 recording=recording,
                 video_log_path=video_log_path,
                 hand="right",
                 rgb_hw3=rgb_hw3,
                 xyxy=det_result.right_xyxy,
             )
-            self._log_hand_prediction(
+            left_uv_conf: Float[np.ndarray, "n_kpts 3"] | None = self._log_hand_prediction(
                 recording=recording,
                 video_log_path=video_log_path,
                 hand="left",
                 rgb_hw3=rgb_hw3,
                 xyxy=det_result.left_xyxy,
+            )
+            if collect_keypoints:
+                hand_data: dict[Handedness, Float[np.ndarray, "n_kpts 3"]] = {}
+                if right_uv_conf is not None:
+                    hand_data["right"] = right_uv_conf
+                if left_uv_conf is not None:
+                    hand_data["left"] = left_uv_conf
+                if hand_data:
+                    collected[video_log_path] = hand_data
+        return collected
+
+    def _triangulate_exo_views(
+        self,
+        *,
+        hand_keypoints: dict[Path, dict[Handedness, Float[np.ndarray, "n_kpts 3"]]],
+        pinhole_params_list: list[PinholeParameters],
+        video_log_paths: list[Path],
+        recording: rr.RecordingStream,
+        parent_log_path: Path,
+    ) -> None:
+        triangulation_root: Path = parent_log_path / "triangulated"
+        hand_order: tuple[Handedness, ...] = ("left", "right")
+
+        for hand in hand_order:
+            per_view_keypoints: list[Float[np.ndarray, "n_kpts 3"]] = []
+            projection_matrices: list[Float[np.ndarray, "3 4"]] = []
+
+            for pinhole_param, video_log_path in zip(pinhole_params_list, video_log_paths, strict=False):
+                hand_data: dict[Handedness, Float[np.ndarray, "n_kpts 3"]] | None = hand_keypoints.get(video_log_path)
+                if hand_data is None:
+                    continue
+                uv_conf: Float[np.ndarray, "n_kpts 3"] | None = hand_data.get(hand)
+                if uv_conf is None:
+                    continue
+
+                per_view_keypoints.append(uv_conf.astype(np.float32))
+                projection_matrices.append(pinhole_param.projection_matrix.astype(np.float32))
+
+            if len(per_view_keypoints) < 2:
+                rr.log(
+                    str(triangulation_root / f"{hand}_hand"),
+                    rr.Clear(recursive=True),
+                    recording=recording,
+                )
+                continue
+
+            keypoints_stack: Float[np.ndarray, "n_views n_kpts 3"] = np.stack(per_view_keypoints, axis=0)
+            proj_stack: Float[np.ndarray, "n_views 3 4"] = np.stack(projection_matrices, axis=0)
+
+            xyzc: Float[np.ndarray, "n_kpts 4"] = batch_triangulate(
+                keypoints_2d=keypoints_stack,
+                projection_matrices=proj_stack,
+                min_views=2,
+            ).astype(np.float32)
+
+            confidence: Float[np.ndarray, "n_kpts"] = xyzc[:, 3]
+            valid_mask: Bool[np.ndarray, "n_kpts"] = confidence > 0.0
+            if not np.any(valid_mask):
+                rr.log(
+                    str(triangulation_root / f"{hand}_hand"),
+                    rr.Clear(recursive=True),
+                    recording=recording,
+                )
+                continue
+
+            positions: Float[np.ndarray, "n_kpts 3"] = xyzc[:, :3].astype(np.float32)
+            positions[~valid_mask] = np.nan
+            confidence_for_colors: Float[np.ndarray, "1 n_kpts 1"] = confidence.astype(np.float32)[
+                np.newaxis, :, np.newaxis
+            ]
+            colors_tensor: UInt8[np.ndarray, "1 n_kpts 3"] = confidence_scores_to_rgb(
+                confidence_scores=confidence_for_colors
+            )
+            colors: UInt8[np.ndarray, "n_kpts 3"] = colors_tensor[0]
+            rr.log(
+                str(triangulation_root / f"{hand}_hand"),
+                rr.Points3D(
+                    positions=positions,
+                    colors=colors,
+                    radii=0.005,
+                    keypoint_ids=MEDIAPIPE_IDS,
+                    class_ids=HAND_CLASS_IDS[hand],
+                    show_labels=False,
+                ),
+                recording=recording,
             )
 
     def predict_xyxy(self, state: AppState) -> AppState:
@@ -335,11 +425,25 @@ class Engine:
 
             if self.exo_mv_reader is not None:
                 exo_bgr_list: list[UInt8[ndarray, "h w 3"]] = self.exo_mv_reader[ts_idx]
-                self._process_video_reader(
+                exo_keypoints: dict[Path, dict[Handedness, Float[np.ndarray, "n_kpts 3"]]] = self._process_video_reader(
                     bgr_frames=exo_bgr_list,
                     video_log_paths=state.rr_log_paths.exo_video_log_paths,
                     recording=recording,
+                    collect_keypoints=True,
                 )
+                if (
+                    exo_keypoints
+                    and state.current_prediction is not None
+                    and state.current_prediction.pinhole_params_list is not None
+                    and state.rr_log_paths.exo_video_log_paths is not None
+                ):
+                    self._triangulate_exo_views(
+                        hand_keypoints=exo_keypoints,
+                        pinhole_params_list=state.current_prediction.pinhole_params_list,
+                        video_log_paths=state.rr_log_paths.exo_video_log_paths,
+                        recording=recording,
+                        parent_log_path=state.rr_log_paths.parent_log_path,
+                    )
                 yield stream.read(), state
 
     def calibrate_mv(self, state: AppState, rgb_list: list[UInt8[ndarray, "H W 3"]]) -> MVCalibResults:

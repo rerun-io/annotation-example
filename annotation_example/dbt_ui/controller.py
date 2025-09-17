@@ -14,7 +14,7 @@ from jaxtyping import Float, Int, UInt8
 from natsort import natsorted
 from numpy import ndarray
 from simplecv.data.skeleton.mediapipe import MEDIAPIPE_ID2NAME, MEDIAPIPE_LINKS
-from simplecv.rerun_log_utils import log_video, log_pinhole
+from simplecv.rerun_log_utils import log_pinhole, log_video
 from simplecv.video_io import MultiVideoReader
 
 from annotation_example.dbt_ui.engine import Engine, MVCalibResults
@@ -35,7 +35,7 @@ def set_annotation_context(recording: rr.RecordingStream) -> None:
                     keypoint_connections=MEDIAPIPE_LINKS,
                 ),
                 rr.ClassDescription(
-                    info=rr.AnnotationInfo(id=1, label="Right Hand", color=(0, 255, 0)),
+                    info=rr.AnnotationInfo(id=1, label="Right Hand", color=(255, 0, 0)),
                     keypoint_annotations=[
                         rr.AnnotationInfo(id=id, label=name) for id, name in MEDIAPIPE_ID2NAME.items()
                     ],

@@ -9,8 +9,8 @@ from typing import Literal
 import numpy as np
 from jaxtyping import Int
 from numpy import ndarray
-from wilor_nano.hand_detection import DetectionResult
 from simplecv.camera_parameters import PinholeParameters
+from wilor_nano.hand_detection import DetectionResult
 
 
 @dataclass
