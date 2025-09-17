@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Literal
 
 import numpy as np
-from jaxtyping import Int
+from jaxtyping import Float, Int
 from numpy import ndarray
 from simplecv.camera_parameters import PinholeParameters
 from wilor_nano.hand_detection import DetectionResult
@@ -67,6 +67,12 @@ class AppState:
 
     current_prediction: CurrentPrediction | None = None
     """Prediction data for the frame currently shown to the user."""
+
+    keypoints_by_entity_time: dict[str, dict[int, Float[np.ndarray, "n 2"]]] = field(default_factory=dict)
+    """Manual 2D keypoints logged per entity path and timestamp (ns)."""
+
+    active_control_panel: Literal["Run Networks", "Label"] = "Run Networks"
+    """Left-hand control tab currently selected by the user."""
 
 
 class Action(Enum):

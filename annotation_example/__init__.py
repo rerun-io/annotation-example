@@ -14,6 +14,7 @@ if os.environ.get("PIXI_ENVIRONMENT_NAME") == "dev":
                     "annotation_example.gradio_ui.mv_sam_callbacks",
                     "annotation_example.gradio_ui.sv_sam_callbacks",
                     "annotation_example.gradio_ui.person_annot_callbacks",
+                    "annotation_example.dbt_ui.dbt_callbacks",
                 )
             )
         )
