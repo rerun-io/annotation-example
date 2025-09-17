@@ -14,6 +14,7 @@ from gradio_rerun.events import SelectionChangeEvent
 from jaxtyping import Float, Int, UInt8
 from natsort import natsorted
 from numpy import ndarray
+from rerun.event import ContainerSelectionItem, EntitySelectionItem, ViewSelectionItem
 from simplecv.data.skeleton.mediapipe import MEDIAPIPE_ID2NAME, MEDIAPIPE_LINKS
 from simplecv.rerun_log_utils import log_pinhole, log_video
 from simplecv.video_io import MultiVideoReader
@@ -193,9 +194,15 @@ class Controller:
             return
         current_time_ns: int = state.current_time_ns
         evt: SelectionChangeEvent = state.selection_evt
-        items = evt.items
-        assert len(items) == 1
-        item = items[0]
+        items: list[EntitySelectionItem | ViewSelectionItem | ContainerSelectionItem] = evt.items
+        if not (len(items) == 1 and isinstance(items[0], EntitySelectionItem)):
+            raise gr.Error("Please select a single entity to log a keypoint.")
+        item: EntitySelectionItem = items[0]
+        entity_path: Path = Path(item.entity_path)
+        # make sure that we're only logging keypoints on video entities
+        if entity_path.name != "video":
+            yield None, state, f"Selected entity is not a video: {item.entity_path}"
+            return
 
         point_xy: Float[np.ndarray, "1 2"] = np.asarray([item.position[0:2]], dtype=np.float32)
         keypoints: dict[str, dict[int, Float[np.ndarray, "n 2"]]] = {
@@ -209,6 +216,7 @@ class Controller:
         stream: rr.BinaryStream = recording.binary_stream()
 
         target_entity_path: str = _keypoint_entity_path(item.entity_path)
+        print("*" * 50)
         rr.set_time(
             state.rr_log_paths.timeline,
             duration=current_time_ns * 1e-9,
