@@ -78,6 +78,12 @@ class AppState:
     active_control_panel: Literal["Run Networks", "Label"] = "Run Networks"
     """Left-hand control tab currently selected by the user."""
 
+    selected_hand: Literal["left", "right"] = "left"
+    """Currently targeted hand for manual bounding-box annotation."""
+
+    selected_bbox_corner: Literal["top_left", "bottom_right", "none"] = "none"
+    """Active bounding-box corner selection used while collecting manual clicks."""
+
 
 class Action(Enum):
     NEXT = auto()

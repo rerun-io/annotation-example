@@ -127,12 +127,6 @@ def _extract_zip_to_videos_dir(zipfile_path: Path) -> Path:
     return videos_dir
 
 
-def _keypoint_entity_path(entity_path: str) -> str:
-    """Return the Rerun path where manual keypoints for an entity are logged."""
-
-    return f"{entity_path}/annotations/manual_keypoint"
-
-
 class Controller:
     """Glue between UI events, Engine calls, pure state transitions, and Rerun logging."""
 
@@ -143,6 +137,48 @@ class Controller:
         self.engine: Engine = engine
         # only show info on the start, so we'll switch to Annotations tab on video upload
         self.tab_name: Literal["Info", "Annotations"] = "Info"
+
+    def set_hand_selection(
+        self,
+        state: gr.State | AppState,
+        hand_label: str | None,
+    ) -> AppState | gr.State:
+        if not isinstance(state, AppState):
+            return state
+
+        label_input: str = (hand_label or "").strip().lower()
+        mapping: dict[str, Literal["left", "right"]] = {
+            "left hand": "left",
+            "right hand": "right",
+            "left": "left",
+            "right": "right",
+        }
+        selected_hand: Literal["left", "right"] = mapping.get(label_input, state.selected_hand)
+        updated_state: AppState = replace(state, selected_hand=selected_hand)
+        return updated_state
+
+    def set_bbox_corner_selection(
+        self,
+        state: gr.State | AppState,
+        corner_label: str | None,
+    ) -> AppState | gr.State:
+        if not isinstance(state, AppState):
+            return state
+
+        label_input: str = (corner_label or "").strip().lower()
+        mapping: dict[str, Literal["top_left", "bottom_right", "none"]] = {
+            "top left": "top_left",
+            "tl": "top_left",
+            "bottom right": "bottom_right",
+            "br": "bottom_right",
+            "no bounding box": "none",
+            "none": "none",
+        }
+        selected_corner: Literal["top_left", "bottom_right", "none"] = mapping.get(
+            label_input, state.selected_bbox_corner
+        )
+        updated_state: AppState = replace(state, selected_bbox_corner=selected_corner)
+        return updated_state
 
     # ---- handlers wired by the panel ----
     def log_state(self, state):
@@ -207,32 +243,48 @@ class Controller:
 
         point_xy: Float[np.ndarray, "1 2"] = np.asarray([item.position[0:2]], dtype=np.float32)
         keypoints: dict[str, dict[int, Float[np.ndarray, "n 2"]]] = {
-            entity_path: dict(points_by_time) for entity_path, points_by_time in state.keypoints_by_entity_time.items()
+            str(entity_path): dict(points_by_time)
+            for entity_path, points_by_time in state.keypoints_by_entity_time.items()
         }
-        entity_points: dict[int, Float[np.ndarray, "n 2"]] = keypoints.get(item.entity_path, {})
+        selected_hand: Literal["left", "right"] = state.selected_hand
+        selected_corner: Literal["top_left", "bottom_right", "none"] = state.selected_bbox_corner
+        if selected_corner != "none":
+            corner_suffix_map: dict[str, str] = {"top_left": "tl", "bottom_right": "br"}
+            corner_suffix: str = corner_suffix_map[selected_corner]
+            target_entity_str: str = (pinhole_path / selected_hand / f"{corner_suffix}_xyxy_kp").as_posix()
+            color_lookup: dict[tuple[str, str], tuple[int, int, int]] = {
+                ("left", "top_left"): (0, 196, 255),
+                ("left", "bottom_right"): (0, 128, 210),
+                ("right", "top_left"): (255, 140, 0),
+                ("right", "bottom_right"): (210, 32, 0),
+            }
+            colors: tuple[int, int, int] = color_lookup[(selected_hand, selected_corner)]
+        else:
+            yield None, state, "No bounding box corner selected."
+            return
+
+        entity_points: dict[int, Float[np.ndarray, "n 2"]] = keypoints.get(target_entity_str, {})
         entity_points[current_time_ns] = point_xy
-        keypoints[item.entity_path] = entity_points
+        keypoints[target_entity_str] = entity_points
 
         recording: rr.RecordingStream = get_recording(state.recording_id)
         stream: rr.BinaryStream = recording.binary_stream()
 
-        target_entity_path: str = _keypoint_entity_path(item.entity_path)
-        print("*" * 50)
         rr.set_time(
             state.rr_log_paths.timeline,
             duration=current_time_ns * 1e-9,
             recording=recording,
         )
         rr.log(
-            target_entity_path,
-            rr.Points2D(point_xy, colors=(255, 221, 0), radii=25),
+            target_entity_str,
+            rr.Points2D(point_xy, colors=colors, radii=15, labels=corner_suffix.upper()),
             recording=recording,
         )
 
         stream.flush()
         payload: bytes = stream.read()
         new_state: AppState = replace(state, keypoints_by_entity_time=keypoints)
-        status = _format_keypoint_status(
+        status: str = _format_keypoint_status(
             new_state.keypoints_by_entity_time,
             current_time_ns=current_time_ns,
         )

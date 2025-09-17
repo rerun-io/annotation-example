@@ -44,8 +44,6 @@ def _format_keypoint_status(
     for entity_path, point in sorted(active_entries):
         lines.append(f"- `{entity_path}` → ({point[0]:.1f}, {point[1]:.1f})")
     return "\n".join(lines)
-
-
 def register_label_keypoint(
     state: AppState,
     _request: gr.Request,

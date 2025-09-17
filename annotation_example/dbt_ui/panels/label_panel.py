@@ -13,12 +13,16 @@ class LabelPanel:
     root: gr.Column | None = None
     hand_selector: gr.Radio | None = None
     bbox_selector: gr.Radio | None = None
+    confirm_button: gr.Button | None = None
     status: gr.Markdown | None = None
 
     def build(self):
         with gr.Column() as self.root:
             gr.Markdown("### Label Panel")
-            gr.Markdown("Select a desired timestamp, then click a 2D view to drop a keypoint for that specific frame.")
+            gr.Markdown(
+                "Select a desired timestamp, then click a 2D view to drop a keypoint for that specific frame."
+                "  `TL` = top-left corner, `BR` = bottom-right corner. Choose `None` to ignore clicks."
+            )
             self.status = gr.Markdown("No keypoints yet.")
             self.hand_selector = gr.Radio(
                 label="Hand",
@@ -28,10 +32,11 @@ class LabelPanel:
             )
             self.bbox_selector = gr.Radio(
                 label="Bounding box corner",
-                choices=["Top left", "Bottom right", "No bounding box"],
-                value="No bounding box",
+                choices=["TL", "BR", "None"],
+                value="None",
                 interactive=True,
             )
+            self.confirm_button = gr.Button("Confirm bounding box", variant="primary")
         return self
 
     def wire(
@@ -39,7 +44,17 @@ class LabelPanel:
         ctrl: Controller,
         state: gr.State | AppState,
         viewer: Rerun,
-    ) -> None:
+        ) -> None:
+        self.hand_selector.change(
+            ctrl.set_hand_selection,
+            inputs=[state, self.hand_selector],
+            outputs=[state],
+        )
+        self.bbox_selector.change(
+            ctrl.set_bbox_corner_selection,
+            inputs=[state, self.bbox_selector],
+            outputs=[state],
+        )
         viewer.selection_change(
             register_label_keypoint,
             inputs=[state],
