@@ -97,6 +97,7 @@ class LabelApp:
         )
 
         self.label_panel.wire(
+            ctrl=self.ctrl,
             state=self.state_comp,
             viewer=viewer,
         )

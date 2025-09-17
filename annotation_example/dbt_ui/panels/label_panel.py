@@ -3,6 +3,7 @@ from dataclasses import dataclass
 import gradio as gr
 from gradio_rerun import Rerun
 
+from annotation_example.dbt_ui.controller import Controller
 from annotation_example.dbt_ui.dbt_callbacks import register_label_keypoint
 from annotation_example.dbt_ui.state import AppState
 
@@ -23,11 +24,16 @@ class LabelPanel:
 
     def wire(
         self,
+        ctrl: Controller,
         state: gr.State | AppState,
         viewer: Rerun,
     ) -> None:
         viewer.selection_change(
             register_label_keypoint,
+            inputs=[state],
+            outputs=[state, self.status],
+        ).then(
+            ctrl.log_keypoint_clicks,
             inputs=[state],
             outputs=[viewer, state, self.status],
         )

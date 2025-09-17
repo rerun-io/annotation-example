@@ -10,6 +10,7 @@ import numpy as np
 import open3d as o3d
 import rerun as rr
 import rerun.blueprint as rrb
+from gradio_rerun.events import SelectionChangeEvent
 from jaxtyping import Float, Int, UInt8
 from natsort import natsorted
 from numpy import ndarray
@@ -17,6 +18,7 @@ from simplecv.data.skeleton.mediapipe import MEDIAPIPE_ID2NAME, MEDIAPIPE_LINKS
 from simplecv.rerun_log_utils import log_pinhole, log_video
 from simplecv.video_io import MultiVideoReader
 
+from annotation_example.dbt_ui.dbt_callbacks import _format_keypoint_status
 from annotation_example.dbt_ui.engine import Engine, MVCalibResults
 from annotation_example.dbt_ui.recording_utils import get_recording
 from annotation_example.dbt_ui.state import AppState, CurrentPrediction
@@ -122,6 +124,12 @@ def _extract_zip_to_videos_dir(zipfile_path: Path) -> Path:
     return videos_dir
 
 
+def _keypoint_entity_path(entity_path: str) -> str:
+    """Return the Rerun path where manual keypoints for an entity are logged."""
+
+    return f"{entity_path}/annotations/manual_keypoint"
+
+
 class Controller:
     """Glue between UI events, Engine calls, pure state transitions, and Rerun logging."""
 
@@ -166,6 +174,58 @@ class Controller:
                 )
 
         yield recording.binary_stream().read(), state
+
+    def log_keypoint_clicks(self, state):
+        """Log keypoints to Rerun when the user clicks inside a 2D view."""
+
+        yield from self._log_keypoint_clicks(state)
+
+    def _log_keypoint_clicks(self, state: gr.State | AppState):
+        """Persist the selected point and update UI state/status messaging."""
+
+        if not isinstance(state, AppState):
+            yield None, state, "No keypoints yet."
+            return
+        if state.selection_evt is None:
+            yield None, state, "No keypoints yet."
+            return
+        current_time_ns: int = state.current_time_ns
+        evt: SelectionChangeEvent = state.selection_evt
+        items = evt.items
+        assert len(items) == 1
+        item = items[0]
+
+        point_xy: Float[np.ndarray, "1 2"] = np.asarray([item.position[0:2]], dtype=np.float32)
+        keypoints: dict[str, dict[int, Float[np.ndarray, "n 2"]]] = {
+            entity_path: dict(points_by_time) for entity_path, points_by_time in state.keypoints_by_entity_time.items()
+        }
+        entity_points: dict[int, Float[np.ndarray, "n 2"]] = keypoints.get(item.entity_path, {})
+        entity_points[current_time_ns] = point_xy
+        keypoints[item.entity_path] = entity_points
+
+        recording: rr.RecordingStream = get_recording(state.recording_id)
+        stream: rr.BinaryStream = recording.binary_stream()
+
+        target_entity_path: str = _keypoint_entity_path(item.entity_path)
+        rr.set_time(
+            state.rr_log_paths.timeline,
+            duration=current_time_ns * 1e-9,
+            recording=recording,
+        )
+        rr.log(
+            target_entity_path,
+            rr.Points2D(point_xy, colors=(255, 221, 0), radii=25),
+            recording=recording,
+        )
+
+        stream.flush()
+        payload: bytes = stream.read()
+        new_state: AppState = replace(state, keypoints_by_entity_time=keypoints)
+        status = _format_keypoint_status(
+            new_state.keypoints_by_entity_time,
+            current_time_ns=current_time_ns,
+        )
+        yield payload, new_state, status
 
     def initialize_rrd(self, video, state):
         yield from self._initialize_rrd(video, state)
