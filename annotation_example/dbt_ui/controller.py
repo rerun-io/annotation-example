@@ -199,9 +199,10 @@ class Controller:
             raise gr.Error("Please select a single entity to log a keypoint.")
         item: EntitySelectionItem = items[0]
         entity_path: Path = Path(item.entity_path)
-        # make sure that we're only logging keypoints on video entities
-        if entity_path.name != "video":
-            yield None, state, f"Selected entity is not a video: {item.entity_path}"
+        # make sure that we're only logging keypoints on pinhole cameras
+        pinhole_path: Path = entity_path.parent
+        if pinhole_path.name != "pinhole" and entity_path.name != "video":
+            yield None, state, f"Selected entity is not a pinhole camera: {item.entity_path}"
             return
 
         point_xy: Float[np.ndarray, "1 2"] = np.asarray([item.position[0:2]], dtype=np.float32)

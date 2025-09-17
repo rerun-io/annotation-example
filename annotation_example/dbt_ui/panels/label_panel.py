@@ -11,7 +11,8 @@ from annotation_example.dbt_ui.state import AppState
 @dataclass
 class LabelPanel:
     root: gr.Column | None = None
-    clear_button: gr.Button | None = None
+    hand_selector: gr.Radio | None = None
+    bbox_selector: gr.Radio | None = None
     status: gr.Markdown | None = None
 
     def build(self):
@@ -19,7 +20,18 @@ class LabelPanel:
             gr.Markdown("### Label Panel")
             gr.Markdown("Select a desired timestamp, then click a 2D view to drop a keypoint for that specific frame.")
             self.status = gr.Markdown("No keypoints yet.")
-            self.clear_button = gr.Button("Clear keypoints")
+            self.hand_selector = gr.Radio(
+                label="Hand",
+                choices=["Left hand", "Right hand"],
+                value="Left hand",
+                interactive=True,
+            )
+            self.bbox_selector = gr.Radio(
+                label="Bounding box corner",
+                choices=["Top left", "Bottom right", "No bounding box"],
+                value="No bounding box",
+                interactive=True,
+            )
         return self
 
     def wire(
