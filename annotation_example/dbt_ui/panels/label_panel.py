@@ -21,7 +21,9 @@ class LabelPanel:
             gr.Markdown("### Label Panel")
             gr.Markdown(
                 "Select a desired timestamp, then click a 2D view to drop a keypoint for that specific frame."
-                "  `TL` = top-left corner, `BR` = bottom-right corner. Choose `None` to ignore clicks."
+                "  `TL` = top-left corner, `BR` = bottom-right corner. Choose `None` to wipe manual TL/BR markers"
+                " and remove any confirmed or auto-detected bounding box for the active hand at the current"
+                " timestamp."
             )
             self.status = gr.Markdown("No keypoints yet.")
             self.hand_selector = gr.Radio(
@@ -33,7 +35,7 @@ class LabelPanel:
             self.bbox_selector = gr.Radio(
                 label="Bounding box corner",
                 choices=["TL", "BR", "None"],
-                value="None",
+                value="TL",
                 interactive=True,
             )
             self.confirm_button = gr.Button("Confirm bounding box", variant="primary")
@@ -54,6 +56,10 @@ class LabelPanel:
             ctrl.set_bbox_corner_selection,
             inputs=[state, self.bbox_selector],
             outputs=[state],
+        ).then(
+            ctrl.on_corner_selection_changed,
+            inputs=[state],
+            outputs=[viewer, state, self.status, self.bbox_selector],
         )
         viewer.selection_change(
             register_label_keypoint,
@@ -62,5 +68,10 @@ class LabelPanel:
         ).then(
             ctrl.log_keypoint_clicks,
             inputs=[state],
-            outputs=[viewer, state, self.status],
+            outputs=[viewer, state, self.status, self.bbox_selector],
+        )
+        self.confirm_button.click(
+            ctrl.confirm_bounding_boxes,
+            inputs=[state],
+            outputs=[viewer, state, self.status, self.bbox_selector],
         )

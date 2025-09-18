@@ -2,7 +2,7 @@
 import uuid
 from dataclasses import replace
 from pathlib import Path
-from typing import Literal, assert_never
+from typing import Literal, assert_never, cast
 
 import cv2
 import gradio as gr
@@ -18,11 +18,47 @@ from rerun.event import ContainerSelectionItem, EntitySelectionItem, ViewSelecti
 from simplecv.data.skeleton.mediapipe import MEDIAPIPE_ID2NAME, MEDIAPIPE_LINKS
 from simplecv.rerun_log_utils import log_pinhole, log_video
 from simplecv.video_io import MultiVideoReader
+from wilor_nano.hand_detection import DetectionResult
 
-from annotation_example.dbt_ui.dbt_callbacks import _format_keypoint_status
-from annotation_example.dbt_ui.engine import Engine, MVCalibResults
+from annotation_example.dbt_ui.dbt_callbacks import (
+    _format_keypoint_status,
+    end_selection_processing,
+)
+from annotation_example.dbt_ui.engine import HAND_CLASS_IDS, Engine, MVCalibResults
 from annotation_example.dbt_ui.recording_utils import get_recording
 from annotation_example.dbt_ui.state import AppState, CurrentPrediction
+
+HandName = Literal["left", "right"]
+CornerName = Literal["top_left", "bottom_right"]
+
+CORNER_SUFFIX_MAP: dict[CornerName, str] = {
+    "top_left": "tl",
+    "bottom_right": "br",
+}
+
+CORNER_TO_RADIO: dict[Literal["top_left", "bottom_right", "none"], str] = {
+    "top_left": "TL",
+    "bottom_right": "BR",
+    "none": "None",
+}
+
+RADIO_TO_CORNER: dict[str, Literal["top_left", "bottom_right", "none"]] = {
+    "top left": "top_left",
+    "tl": "top_left",
+    "bottom right": "bottom_right",
+    "br": "bottom_right",
+    "none": "none",
+    "no bounding box": "none",
+}
+
+CORNER_LABEL_MAP: dict[CornerName, str] = {corner: suffix.upper() for corner, suffix in CORNER_SUFFIX_MAP.items()}
+
+CORNER_COLOR_LOOKUP: dict[tuple[HandName, CornerName], tuple[int, int, int]] = {
+    ("left", "top_left"): (0, 196, 255),
+    ("left", "bottom_right"): (0, 128, 210),
+    ("right", "top_left"): (255, 140, 0),
+    ("right", "bottom_right"): (210, 32, 0),
+}
 
 
 def set_annotation_context(recording: rr.RecordingStream) -> None:
@@ -59,7 +95,7 @@ def create_dbt_blueprint(
     # Use a container for the Annotations tab so we can arrange multiple views.
     # NOTE: Tabs.active_tab only matches by name for View children, not Containers.
     #       When the child is a Container, we must select the tab by index instead.
-    annotation_tab = rrb.Spatial3DView()
+    annotation_tab = rrb.Spatial3DView(line_grid=False)
     if state.rr_log_paths.ego_video_log_paths is not None:
         ego_2d_views: rrb.Vertical = rrb.Vertical(
             contents=[
@@ -166,19 +202,29 @@ class Controller:
             return state
 
         label_input: str = (corner_label or "").strip().lower()
-        mapping: dict[str, Literal["top_left", "bottom_right", "none"]] = {
-            "top left": "top_left",
-            "tl": "top_left",
-            "bottom right": "bottom_right",
-            "br": "bottom_right",
-            "no bounding box": "none",
-            "none": "none",
-        }
-        selected_corner: Literal["top_left", "bottom_right", "none"] = mapping.get(
+        selected_corner: Literal["top_left", "bottom_right", "none"] = RADIO_TO_CORNER.get(
             label_input, state.selected_bbox_corner
         )
         updated_state: AppState = replace(state, selected_bbox_corner=selected_corner)
         return updated_state
+
+    def on_corner_selection_changed(self, state):
+        yield from self._on_corner_selection_changed(state)
+
+    def _on_corner_selection_changed(self, state: gr.State | AppState):
+        if not isinstance(state, AppState):
+            yield None, state, "No keypoints yet.", CORNER_TO_RADIO["top_left"]
+            return
+
+        if state.selected_bbox_corner != "none":
+            status: str = _format_keypoint_status(
+                state.keypoints_by_entity_time,
+                current_time_ns=state.current_time_ns,
+            )
+            yield None, state, status, CORNER_TO_RADIO[state.selected_bbox_corner]
+            return
+
+        yield from self._clear_hand_annotations(state)
 
     # ---- handlers wired by the panel ----
     def log_state(self, state):
@@ -223,72 +269,342 @@ class Controller:
         """Persist the selected point and update UI state/status messaging."""
 
         if not isinstance(state, AppState):
-            yield None, state, "No keypoints yet."
-            return
-        if state.selection_evt is None:
-            yield None, state, "No keypoints yet."
-            return
-        current_time_ns: int = state.current_time_ns
-        evt: SelectionChangeEvent = state.selection_evt
-        items: list[EntitySelectionItem | ViewSelectionItem | ContainerSelectionItem] = evt.items
-        if not (len(items) == 1 and isinstance(items[0], EntitySelectionItem)):
-            raise gr.Error("Please select a single entity to log a keypoint.")
-        item: EntitySelectionItem = items[0]
-        entity_path: Path = Path(item.entity_path)
-        # make sure that we're only logging keypoints on pinhole cameras
-        pinhole_path: Path = entity_path.parent
-        if pinhole_path.name != "pinhole" and entity_path.name != "video":
-            yield None, state, f"Selected entity is not a pinhole camera: {item.entity_path}"
+            yield None, state, "No keypoints yet.", CORNER_TO_RADIO["top_left"]
             return
 
-        point_xy: Float[np.ndarray, "1 2"] = np.asarray([item.position[0:2]], dtype=np.float32)
-        keypoints: dict[str, dict[int, Float[np.ndarray, "n 2"]]] = {
-            str(entity_path): dict(points_by_time)
-            for entity_path, points_by_time in state.keypoints_by_entity_time.items()
-        }
-        selected_hand: Literal["left", "right"] = state.selected_hand
-        selected_corner: Literal["top_left", "bottom_right", "none"] = state.selected_bbox_corner
-        if selected_corner != "none":
-            corner_suffix_map: dict[str, str] = {"top_left": "tl", "bottom_right": "br"}
-            corner_suffix: str = corner_suffix_map[selected_corner]
+        recording_id = state.recording_id
+
+        try:
+            if state.selection_evt is None:
+                yield None, state, "No keypoints yet.", CORNER_TO_RADIO[state.selected_bbox_corner]
+                return
+
+            current_time_ns: int = state.current_time_ns
+            evt: SelectionChangeEvent = state.selection_evt
+            items: list[EntitySelectionItem | ViewSelectionItem | ContainerSelectionItem] = evt.items
+            if not (len(items) == 1 and isinstance(items[0], EntitySelectionItem)):
+                raise gr.Error("Please select a single entity to log a keypoint.")
+            item: EntitySelectionItem = items[0]
+            entity_path: Path = Path(item.entity_path)
+            # make sure that we're only logging keypoints on pinhole cameras
+            pinhole_path: Path = entity_path.parent
+            if pinhole_path.name != "pinhole" and entity_path.name != "video":
+                yield (
+                    None,
+                    state,
+                    f"Selected entity is not a pinhole camera: {item.entity_path}",
+                    CORNER_TO_RADIO[state.selected_bbox_corner],
+                )
+                return
+
+            point_xy: Float[np.ndarray, "1 2"] = np.asarray([item.position[0:2]], dtype=np.float32)
+            selected_hand: Literal["left", "right"] = state.selected_hand
+            selected_corner: Literal["top_left", "bottom_right", "none"] = state.selected_bbox_corner
+            if selected_corner == "none":
+                # Treat a click while "None" is selected as a request to clear annotations for this view.
+                yield from self._clear_hand_annotations(state)
+                return
+
+            corner_suffix: str = CORNER_SUFFIX_MAP[selected_corner]
             target_entity_str: str = (pinhole_path / selected_hand / f"{corner_suffix}_xyxy_kp").as_posix()
-            color_lookup: dict[tuple[str, str], tuple[int, int, int]] = {
-                ("left", "top_left"): (0, 196, 255),
-                ("left", "bottom_right"): (0, 128, 210),
-                ("right", "top_left"): (255, 140, 0),
-                ("right", "bottom_right"): (210, 32, 0),
+            colors: tuple[int, int, int] = CORNER_COLOR_LOOKUP[(selected_hand, selected_corner)]
+
+            keypoints: dict[str, dict[int, Float[np.ndarray, "n 2"]]] = {
+                str(entity_path): dict(points_by_time)
+                for entity_path, points_by_time in state.keypoints_by_entity_time.items()
             }
-            colors: tuple[int, int, int] = color_lookup[(selected_hand, selected_corner)]
-        else:
-            yield None, state, "No bounding box corner selected."
+            entity_points: dict[int, Float[np.ndarray, "n 2"]] = keypoints.get(target_entity_str, {})
+            entity_points[current_time_ns] = point_xy
+            keypoints[target_entity_str] = entity_points
+
+            recording: rr.RecordingStream = get_recording(state.recording_id)
+            stream: rr.BinaryStream = recording.binary_stream()
+
+            rr.set_time(
+                state.rr_log_paths.timeline,
+                duration=current_time_ns * 1e-9,
+                recording=recording,
+            )
+            rr.log(
+                target_entity_str,
+                rr.Points2D(
+                    point_xy,
+                    colors=colors,
+                    radii=15,
+                    labels=CORNER_LABEL_MAP[selected_corner],
+                ),
+                recording=recording,
+            )
+
+            stream.flush()
+            payload_bytes: bytes = stream.read()
+            payload: bytes | None = payload_bytes if payload_bytes else None
+            next_corner: Literal["top_left", "bottom_right"] = (
+                "bottom_right" if selected_corner == "top_left" else "top_left"
+            )
+            new_state: AppState = replace(
+                state,
+                keypoints_by_entity_time=keypoints,
+                selected_bbox_corner=next_corner,
+                selection_evt=None,
+            )
+            status: str = _format_keypoint_status(
+                new_state.keypoints_by_entity_time,
+                current_time_ns=current_time_ns,
+            )
+            next_radio_value: str = CORNER_TO_RADIO[next_corner]
+            yield payload, new_state, status, next_radio_value
+        finally:
+            end_selection_processing(recording_id)
+        return
+
+    def confirm_bounding_boxes(self, state):
+        yield from self._confirm_bounding_boxes(state)
+
+    def _confirm_bounding_boxes(self, state: gr.State | AppState):
+        if not isinstance(state, AppState):
+            yield None, state, "No keypoints yet.", CORNER_TO_RADIO["top_left"]
             return
 
-        entity_points: dict[int, Float[np.ndarray, "n 2"]] = keypoints.get(target_entity_str, {})
-        entity_points[current_time_ns] = point_xy
-        keypoints[target_entity_str] = entity_points
+        current_time_ns: int = state.current_time_ns
+        keypoints_snapshot: dict[str, dict[int, Float[np.ndarray, "n 2"]]] = {
+            entity_path: dict(points_by_time) for entity_path, points_by_time in state.keypoints_by_entity_time.items()
+        }
+
+        # Collect TL/BR pairs per hand and pinhole.
+        corner_points: dict[tuple[str, HandName], dict[str, tuple[str, Float[np.ndarray, "1 2"]]]] = {}
+        for path_str, by_time in keypoints_snapshot.items():
+            if current_time_ns not in by_time:
+                continue
+            path_obj: Path = Path(path_str)
+            corner_name: str = path_obj.name
+            if corner_name not in {"tl_xyxy_kp", "br_xyxy_kp"}:
+                continue
+            hand_name: str = path_obj.parent.name
+            if hand_name not in {"left", "right"}:
+                continue
+            pinhole_path: Path = path_obj.parent.parent
+            hand_literal: HandName = cast(HandName, hand_name)
+            corner_key: CornerName = "top_left" if corner_name.startswith("tl") else "bottom_right"
+            corner_points.setdefault((pinhole_path.as_posix(), hand_literal), {})[corner_key] = (
+                path_str,
+                by_time[current_time_ns],
+            )
+
+        if not corner_points:
+            status: str = _format_keypoint_status(
+                state.keypoints_by_entity_time,
+                current_time_ns=current_time_ns,
+            )
+            yield None, state, "No corners to confirm.", CORNER_TO_RADIO[state.selected_bbox_corner]
+            return
 
         recording: rr.RecordingStream = get_recording(state.recording_id)
         stream: rr.BinaryStream = recording.binary_stream()
+        timeline: str = state.rr_log_paths.timeline
 
-        rr.set_time(
-            state.rr_log_paths.timeline,
-            duration=current_time_ns * 1e-9,
-            recording=recording,
-        )
-        rr.log(
-            target_entity_str,
-            rr.Points2D(point_xy, colors=colors, radii=15, labels=corner_suffix.upper()),
-            recording=recording,
-        )
+        updated_keypoints: dict[str, dict[int, Float[np.ndarray, "n 2"]]] = {
+            entity_path: dict(points_by_time) for entity_path, points_by_time in state.keypoints_by_entity_time.items()
+        }
+        cleared_paths: set[str] = set()
+        confirmed_labels: list[str] = []
+        missing_pairs: list[str] = []
+
+        for (pinhole_path_str, hand_name), corners in corner_points.items():
+            missing = {"top_left", "bottom_right"} - corners.keys()
+            if missing:
+                labels = ", ".join(sorted(missing))
+                missing_pairs.append(f"{hand_name} ({Path(pinhole_path_str).name}) missing {labels}")
+                continue
+            tl_path, tl_xy = corners["top_left"]
+            br_path, br_xy = corners["bottom_right"]
+            tl_coords: Float[np.ndarray, "1 2"] = tl_xy
+            br_coords: Float[np.ndarray, "1 2"] = br_xy
+            x1, y1 = tl_coords[0]
+            x2, y2 = br_coords[0]
+            x_min: float = float(min(x1, x2))
+            x_max: float = float(max(x1, x2))
+            y_min: float = float(min(y1, y2))
+            y_max: float = float(max(y1, y2))
+            box_xyxy: Float[np.ndarray, "1 4"] = np.asarray([[x_min, y_min, x_max, y_max]], dtype=np.float32)
+
+            pinhole_path = Path(pinhole_path_str)
+            hand_literal: HandName = cast(HandName, hand_name)
+            hand_path: Path = pinhole_path / hand_literal
+
+            rr.set_time(timeline, duration=current_time_ns * 1e-9, recording=recording)
+            # Overwrite the same entity used by automatic detections so manual confirmation replaces it.
+            rr.log(
+                f"{hand_path.as_posix()}_xyxy",
+                rr.Boxes2D(
+                    array=box_xyxy,
+                    array_format=rr.Box2DFormat.XYXY,
+                    class_ids=HAND_CLASS_IDS[hand_literal],
+                    show_labels=False,
+                ),
+                recording=recording,
+            )
+            rr.log(
+                f"{state.rr_log_paths.parent_log_path}/video/{hand_literal}_xyxy",
+                rr.Boxes2D(
+                    array=box_xyxy,
+                    array_format=rr.Box2DFormat.XYXY,
+                    class_ids=HAND_CLASS_IDS[hand_literal],
+                    show_labels=False,
+                ),
+                recording=recording,
+            )
+
+            # Clear the temporary keypoint markers and drop them from state.
+            for corner_key, (entity_path_str, _) in corners.items():
+                rr.log(entity_path_str, rr.Clear(recursive=False), recording=recording)
+                cleared_paths.add(entity_path_str)
+                points_by_time = updated_keypoints.get(entity_path_str)
+                if points_by_time and current_time_ns in points_by_time:
+                    del points_by_time[current_time_ns]
+                    if not points_by_time:
+                        updated_keypoints.pop(entity_path_str, None)
+
+            confirmed_labels.append(f"{hand_literal} ({pinhole_path.name})")
+
+        # Re-log remaining keypoints for cleared entities at other timestamps.
+        for path_str in cleared_paths:
+            remaining = updated_keypoints.get(path_str)
+            if not remaining:
+                continue
+            path_obj: Path = Path(path_str)
+            hand_name: HandName = cast(HandName, path_obj.parent.name)
+            corner_name: CornerName = "top_left" if path_obj.name.startswith("tl") else "bottom_right"
+            label: str = CORNER_LABEL_MAP[corner_name]
+            colors: tuple[int, int, int] = CORNER_COLOR_LOOKUP[(hand_name, corner_name)]
+
+            for timestamp_ns, points in remaining.items():
+                rr.set_time(timeline, duration=timestamp_ns * 1e-9, recording=recording)
+                rr.log(
+                    path_str,
+                    rr.Points2D(points, colors=colors, radii=15, labels=label),
+                    recording=recording,
+                )
 
         stream.flush()
-        payload: bytes = stream.read()
-        new_state: AppState = replace(state, keypoints_by_entity_time=keypoints)
+        payload_bytes: bytes = stream.read()
+        payload: bytes | None = payload_bytes if payload_bytes else None
+
+        new_state: AppState = replace(
+            state,
+            keypoints_by_entity_time=updated_keypoints,
+            selected_bbox_corner="top_left",
+            selection_evt=None,
+        )
+
+        if state.current_prediction is not None and state.current_prediction.detection_results is not None:
+            det: DetectionResult = state.current_prediction.detection_results
+            if selected_hand == "left":
+                det = replace(det, left_xyxy=box_xyxy)
+            else:
+                det = replace(det, right_xyxy=box_xyxy)
+            new_pred: CurrentPrediction = replace(state.current_prediction, detection_results=det)
+            new_state = replace(new_state, current_prediction=new_pred)
         status: str = _format_keypoint_status(
             new_state.keypoints_by_entity_time,
             current_time_ns=current_time_ns,
         )
-        yield payload, new_state, status
+        if confirmed_labels:
+            status = f"Confirmed boxes for: {', '.join(confirmed_labels)}"
+        elif missing_pairs:
+            status = f"Need TL+BR before confirming: {', '.join(missing_pairs)}"
+
+        yield payload, new_state, status, CORNER_TO_RADIO[new_state.selected_bbox_corner]
+
+    def _clear_hand_annotations(self, state: AppState):
+        selected_hand: HandName = state.selected_hand
+        current_time_ns: int = state.current_time_ns
+        evt: SelectionChangeEvent | None = state.selection_evt
+        if evt is None or not evt.items:
+            status: str = _format_keypoint_status(
+                state.keypoints_by_entity_time,
+                current_time_ns=current_time_ns,
+            )
+            yield None, state, "Select a view before clearing.", CORNER_TO_RADIO[state.selected_bbox_corner]
+            return
+
+        item = evt.items[0]
+        if not isinstance(item, EntitySelectionItem):
+            status: str = _format_keypoint_status(
+                state.keypoints_by_entity_time,
+                current_time_ns=current_time_ns,
+            )
+            yield None, state, "Select a video before clearing.", CORNER_TO_RADIO[state.selected_bbox_corner]
+            return
+
+        entity_path: Path = Path(item.entity_path)
+        if entity_path.name != "video":
+            status: str = _format_keypoint_status(
+                state.keypoints_by_entity_time,
+                current_time_ns=current_time_ns,
+            )
+            yield None, state, "Select a video before clearing.", CORNER_TO_RADIO[state.selected_bbox_corner]
+            return
+
+        pinhole_path: Path = entity_path.parent
+        hand_path: Path = pinhole_path / selected_hand
+
+        recording: rr.RecordingStream = get_recording(state.recording_id)
+        stream: rr.BinaryStream = recording.binary_stream()
+        rr.set_time(state.rr_log_paths.timeline, duration=current_time_ns * 1e-9, recording=recording)
+
+        updated_keypoints: dict[str, dict[int, Float[np.ndarray, "n 2"]]] = {
+            entity_path: dict(points_by_time) for entity_path, points_by_time in state.keypoints_by_entity_time.items()
+        }
+
+        def remove_manual_entry(path_str: str) -> None:
+            points_by_time = updated_keypoints.get(path_str)
+            if points_by_time is None:
+                return
+            if current_time_ns in points_by_time:
+                del points_by_time[current_time_ns]
+            if not points_by_time:
+                updated_keypoints.pop(path_str, None)
+
+        for manual_suffix in ("tl_xyxy_kp", "br_xyxy_kp"):
+            manual_path: str = (hand_path / manual_suffix).as_posix()
+            remove_manual_entry(manual_path)
+            rr.log(manual_path, rr.Clear(recursive=False), recording=recording)
+
+        rr.log(f"{hand_path.as_posix()}_xyxy", rr.Clear(recursive=False), recording=recording)
+        rr.log(f"{hand_path.as_posix()}_keypoints", rr.Clear(recursive=False), recording=recording)
+        rr.log(
+            f"{state.rr_log_paths.parent_log_path}/video/{selected_hand}_xyxy",
+            rr.Clear(recursive=False),
+            recording=recording,
+        )
+
+        stream.flush()
+        payload_bytes: bytes = stream.read()
+        payload: bytes | None = payload_bytes if payload_bytes else None
+
+        new_state: AppState = replace(
+            state,
+            keypoints_by_entity_time=updated_keypoints,
+            selected_bbox_corner="top_left",
+            selection_evt=None,
+        )
+
+        if state.current_prediction is not None and state.current_prediction.detection_results is not None:
+            det: DetectionResult = state.current_prediction.detection_results
+            if selected_hand == "left":
+                det = replace(det, left_xyxy=None)
+            else:
+                det = replace(det, right_xyxy=None)
+            new_pred: CurrentPrediction = replace(state.current_prediction, detection_results=det)
+            new_state = replace(new_state, current_prediction=new_pred)
+
+        status: str = _format_keypoint_status(
+            new_state.keypoints_by_entity_time,
+            current_time_ns=current_time_ns,
+        )
+
+        yield payload, new_state, status, CORNER_TO_RADIO[new_state.selected_bbox_corner]
 
     def initialize_rrd(self, video, state):
         yield from self._initialize_rrd(video, state)

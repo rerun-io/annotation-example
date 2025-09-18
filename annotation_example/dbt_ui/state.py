@@ -81,7 +81,7 @@ class AppState:
     selected_hand: Literal["left", "right"] = "left"
     """Currently targeted hand for manual bounding-box annotation."""
 
-    selected_bbox_corner: Literal["top_left", "bottom_right", "none"] = "none"
+    selected_bbox_corner: Literal["top_left", "bottom_right", "none"] = "top_left"
     """Active bounding-box corner selection used while collecting manual clicks."""
 
 

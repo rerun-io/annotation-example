@@ -1,9 +1,9 @@
 from collections.abc import Generator
 from dataclasses import replace
+from uuid import UUID
 
 import gradio as gr
 import numpy as np
-import rerun as rr
 from gradio_rerun.events import (
     SelectionChange,
     TimeUpdate,
@@ -12,6 +12,23 @@ from jaxtyping import Float
 from rerun.event import SelectionChangeEvent
 
 from annotation_example.dbt_ui.state import AppState
+
+_active_selection_recordings: set[UUID] = set()
+
+
+def begin_selection_processing(recording_id: UUID) -> bool:
+    """Mark a recording as processing a selection; return False if already busy."""
+
+    if recording_id in _active_selection_recordings:
+        return False
+    _active_selection_recordings.add(recording_id)
+    return True
+
+
+def end_selection_processing(recording_id: UUID) -> None:
+    """Release the busy marker for a recording."""
+
+    _active_selection_recordings.discard(recording_id)
 
 
 def track_current_time(state: AppState, evt: TimeUpdate) -> AppState:
@@ -44,6 +61,8 @@ def _format_keypoint_status(
     for entity_path, point in sorted(active_entries):
         lines.append(f"- `{entity_path}` → ({point[0]:.1f}, {point[1]:.1f})")
     return "\n".join(lines)
+
+
 def register_label_keypoint(
     state: AppState,
     _request: gr.Request,
@@ -71,6 +90,10 @@ def register_label_keypoint(
 
     item = evt.items[0]
     if item.type != "entity" or item.position is None:
+        yield state, status
+        return
+
+    if not begin_selection_processing(state.recording_id):
         yield state, status
         return
 
