@@ -67,14 +67,14 @@ def set_annotation_context(recording: rr.RecordingStream) -> None:
         rr.AnnotationContext(
             [
                 rr.ClassDescription(
-                    info=rr.AnnotationInfo(id=0, label="Left Hand", color=(0, 0, 255)),
+                    info=rr.AnnotationInfo(id=0, label="L", color=(0, 0, 255)),
                     keypoint_annotations=[
                         rr.AnnotationInfo(id=id, label=name) for id, name in MEDIAPIPE_ID2NAME.items()
                     ],
                     keypoint_connections=MEDIAPIPE_LINKS,
                 ),
                 rr.ClassDescription(
-                    info=rr.AnnotationInfo(id=1, label="Right Hand", color=(255, 0, 0)),
+                    info=rr.AnnotationInfo(id=1, label="R", color=(255, 0, 0)),
                     keypoint_annotations=[
                         rr.AnnotationInfo(id=id, label=name) for id, name in MEDIAPIPE_ID2NAME.items()
                     ],
@@ -440,7 +440,7 @@ class Controller:
                     array=box_xyxy,
                     array_format=rr.Box2DFormat.XYXY,
                     class_ids=HAND_CLASS_IDS[hand_literal],
-                    show_labels=False,
+                    show_labels=True,
                 ),
                 recording=recording,
             )
@@ -499,10 +499,9 @@ class Controller:
 
         if state.current_prediction is not None and state.current_prediction.detection_results is not None:
             det: DetectionResult = state.current_prediction.detection_results
-            if selected_hand == "left":
-                det = replace(det, left_xyxy=box_xyxy)
-            else:
-                det = replace(det, right_xyxy=box_xyxy)
+            det = (
+                replace(det, left_xyxy=box_xyxy) if state.selected_hand == "left" else replace(det, right_xyxy=box_xyxy)
+            )
             new_pred: CurrentPrediction = replace(state.current_prediction, detection_results=det)
             new_state = replace(new_state, current_prediction=new_pred)
         status: str = _format_keypoint_status(

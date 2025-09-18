@@ -45,6 +45,11 @@ try:
 except ImportError:
     YOLOX = None  # type: ignore
 
+HAND_CONFIDENCE: float = 0.3
+Handedness = Literal["left", "right"]
+HAND_CLASS_IDS: dict[Handedness, int] = {"left": 0, "right": 1}
+KEYPOINT_CONFIDENCE_THRESHOLD: float = 0.25
+
 
 class MVCalibResults(NamedTuple):
     pinhole_param_list: list[PinholeParameters]
@@ -178,12 +183,6 @@ class MultiViewCalibrator:
         return mv_calib_results
 
 
-HAND_CONFIDENCE: float = 0.3
-Handedness = Literal["left", "right"]
-HAND_CLASS_IDS: dict[Handedness, int] = {"left": 0, "right": 1}
-KEYPOINT_CONFIDENCE_THRESHOLD: float = 0.25
-
-
 class Engine:
     """Used to hold neural network engines."""
 
@@ -242,7 +241,13 @@ class Engine:
 
         rr.log(
             f"{hand_path}_xyxy",
-            rr.Boxes2D(array=xyxy, array_format=rr.Box2DFormat.XYXY, class_ids=class_id, show_labels=False),
+            rr.Boxes2D(
+                array=xyxy,
+                array_format=rr.Box2DFormat.XYXY,
+                class_ids=class_id,
+                show_labels=True,
+                labels="Hello",
+            ),
             recording=recording,
         )
         rr.log(
