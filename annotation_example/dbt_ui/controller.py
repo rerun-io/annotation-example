@@ -15,8 +15,8 @@ from jaxtyping import Float, Int, UInt8
 from natsort import natsorted
 from numpy import ndarray
 from rerun.event import ContainerSelectionItem, EntitySelectionItem, ViewSelectionItem
-from simplecv.data.skeleton.mediapipe import MEDIAPIPE_ID2NAME, MEDIAPIPE_LINKS
-from simplecv.rerun_log_utils import log_pinhole, log_video
+from simplecv.data.skeleton.mediapipe import MEDIAPIPE_ID2NAME, MEDIAPIPE_IDS, MEDIAPIPE_LINKS
+from simplecv.rerun_log_utils import confidence_scores_to_rgb, log_pinhole, log_video
 from simplecv.video_io import MultiVideoReader
 from wilor_nano.hand_detection import DetectionResult
 
@@ -24,9 +24,15 @@ from annotation_example.dbt_ui.dbt_callbacks import (
     _format_keypoint_status,
     end_selection_processing,
 )
-from annotation_example.dbt_ui.engine import HAND_CLASS_IDS, Engine, MVCalibResults
+from annotation_example.dbt_ui.engine import (
+    HAND_CLASS_IDS,
+    KEYPOINT_CONFIDENCE_THRESHOLD,
+    Engine,
+    MVCalibResults,
+    time_to_frame_idx,
+)
 from annotation_example.dbt_ui.recording_utils import get_recording
-from annotation_example.dbt_ui.state import AppState, CurrentPrediction
+from annotation_example.dbt_ui.state import AppState, CurrentPrediction, RerunPaths
 
 HandName = Literal["left", "right"]
 CornerName = Literal["top_left", "bottom_right"]
@@ -409,6 +415,7 @@ class Controller:
         cleared_paths: set[str] = set()
         confirmed_labels: list[str] = []
         missing_pairs: list[str] = []
+        camera_lookup_failures: list[str] = []
 
         for (pinhole_path_str, hand_name), corners in corner_points.items():
             missing = {"top_left", "bottom_right"} - corners.keys()
@@ -432,6 +439,82 @@ class Controller:
             hand_literal: HandName = cast(HandName, hand_name)
             hand_path: Path = pinhole_path / hand_literal
 
+            cam_type: Literal["ego", "exo"] = "ego" if "ego" in pinhole_path.parts else "exo"
+            if cam_type == "ego":
+                mv_reader: MultiVideoReader | None = self.engine.ego_mv_reader
+            else:
+                mv_reader = self.engine.exo_mv_reader
+
+            if mv_reader is None:
+                camera_lookup_failures.append(f"Missing {cam_type} video reader for {pinhole_path.name}")
+                continue
+
+            ts_nano: int = state.current_time_ns
+            video_entity_path: Path = pinhole_path / "video"
+            camera_timestamps: Int[ndarray, "n_frames"] | None = state.video_timestamps_by_path.get(
+                video_entity_path.as_posix()
+            )
+
+            ts_idx: int = -1
+            if camera_timestamps is not None and camera_timestamps.size > 0:
+                ts_idx = time_to_frame_idx(ts_nano, camera_timestamps)
+            else:
+                all_ts_nano: Int[ndarray, "n_frames"] = state.shortest_timestamps
+                if all_ts_nano is not None and all_ts_nano.size > 0:
+                    ts_idx = time_to_frame_idx(ts_nano, all_ts_nano)
+
+            if ts_idx < 0:
+                camera_lookup_failures.append(
+                    f"Missing timestamp alignment for {video_entity_path.as_posix()}"
+                )
+                continue
+
+            frame_count: int = len(mv_reader)
+            if frame_count == 0:
+                camera_lookup_failures.append(
+                    f"No frames available for {video_entity_path.as_posix()}"
+                )
+                continue
+            if ts_idx >= frame_count:
+                camera_lookup_failures.append(
+                    f"Timestamp {ts_nano} clamped to final frame for {video_entity_path.as_posix()}"
+                )
+                ts_idx = frame_count - 1
+
+            bgr_list = mv_reader[ts_idx]
+            rgb_list: list[UInt8[ndarray, "h w 3"]] = [cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB) for bgr in bgr_list]
+
+            camera_part: str | None = next((part for part in pinhole_path.parts if part.startswith("camera_")), None)
+            if camera_part is None:
+                camera_lookup_failures.append(f"Unable to infer camera id from {pinhole_path.as_posix()}")
+                continue
+
+            try:
+                camera_idx: int = int(camera_part.split("_")[1])
+            except (IndexError, ValueError):
+                camera_lookup_failures.append(f"Malformed camera identifier '{camera_part}'")
+                continue
+
+            if camera_idx >= len(rgb_list) or camera_idx < 0:
+                camera_lookup_failures.append(f"Camera index {camera_idx} out of range for {pinhole_path.as_posix()}")
+                continue
+
+            rgb_hw3: UInt8[ndarray, "h w 3"] = rgb_list[camera_idx]
+
+            kpts_results: tuple[
+                Float[ndarray, "n_frames=1 n_kpts=21 2"],
+                Float[ndarray, "n_frames=1 n_kpts=21"],
+            ] = self.engine.hand_keypoint_engine(image=rgb_hw3, xyxy=box_xyxy.tolist())
+            uv: Float[ndarray, "n_frames=1 n_kpts=21 2"] = kpts_results[0]
+            conf: Float[ndarray, "n_frames=1 n_kpts=21"] = kpts_results[1]
+            conf_colors: UInt8[ndarray, "n_frames=1 n_kpts=21 3"] = confidence_scores_to_rgb(
+                confidence_scores=conf[..., np.newaxis]
+            )
+            conf_values: Float[np.ndarray, "n_kpts"] = conf[0].astype(np.float32)
+            valid_mask: np.ndarray = conf_values >= KEYPOINT_CONFIDENCE_THRESHOLD
+            uv_filtered: Float[np.ndarray, "n_kpts 2"] = uv[0].copy()
+            uv_filtered[~valid_mask] = np.nan
+
             rr.set_time(timeline, duration=current_time_ns * 1e-9, recording=recording)
             # Overwrite the same entity used by automatic detections so manual confirmation replaces it.
             rr.log(
@@ -454,9 +537,19 @@ class Controller:
                 ),
                 recording=recording,
             )
-
+            rr.log(
+                f"{hand_path}_keypoints",
+                rr.Points2D(
+                    positions=uv_filtered,
+                    class_ids=HAND_CLASS_IDS[hand_literal],
+                    keypoint_ids=MEDIAPIPE_IDS,
+                    show_labels=False,
+                    colors=conf_colors[0],
+                ),
+                recording=recording,
+            )
             # Clear the temporary keypoint markers and drop them from state.
-            for corner_key, (entity_path_str, _) in corners.items():
+            for _corner_key, (entity_path_str, _) in corners.items():
                 rr.log(entity_path_str, rr.Clear(recursive=False), recording=recording)
                 cleared_paths.add(entity_path_str)
                 points_by_time = updated_keypoints.get(entity_path_str)
@@ -508,10 +601,16 @@ class Controller:
             new_state.keypoints_by_entity_time,
             current_time_ns=current_time_ns,
         )
+        error_messages: list[str] = []
+        if missing_pairs:
+            error_messages.append(f"Need TL+BR before confirming: {', '.join(missing_pairs)}")
+        if camera_lookup_failures:
+            error_messages.append(f"Camera issues: {', '.join(camera_lookup_failures)}")
+
         if confirmed_labels:
             status = f"Confirmed boxes for: {', '.join(confirmed_labels)}"
-        elif missing_pairs:
-            status = f"Need TL+BR before confirming: {', '.join(missing_pairs)}"
+        elif error_messages:
+            status = " | ".join(error_messages)
 
         yield payload, new_state, status, CORNER_TO_RADIO[new_state.selected_bbox_corner]
 
@@ -676,6 +775,7 @@ class Controller:
 
         video_log_paths: list[Path] = []
         timestamps_list: list[Int[ndarray, "num_frames"]] = []
+        timestamps_by_path: dict[str, Int[ndarray, "num_frames"]] = dict(state.video_timestamps_by_path)
         for index, video_path in enumerate(video_paths):
             video_log_path: Path = state.rr_log_paths.parent_log_path / group / f"camera_{index}" / "pinhole" / "video"
             frame_timestamps_ns: Int[ndarray, "num_frames"] = log_video(
@@ -686,9 +786,15 @@ class Controller:
             )
             video_log_paths.append(video_log_path)
             timestamps_list.append(frame_timestamps_ns)
+            timestamps_by_path[video_log_path.as_posix()] = frame_timestamps_ns
 
         log_path_update: dict[str, list[Path]] = {f"{group}_video_log_paths": video_log_paths}
-        state: AppState = replace(state, rr_log_paths=replace(state.rr_log_paths, **log_path_update))
+        updated_rr_paths: RerunPaths = replace(state.rr_log_paths, **log_path_update)
+        state: AppState = replace(
+            state,
+            rr_log_paths=updated_rr_paths,
+            video_timestamps_by_path=timestamps_by_path,
+        )
 
         mv_reader: MultiVideoReader = MultiVideoReader(video_paths)
         setattr(self.engine, f"{group}_mv_reader", mv_reader)

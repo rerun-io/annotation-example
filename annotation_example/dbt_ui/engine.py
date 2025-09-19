@@ -246,7 +246,6 @@ class Engine:
                 array_format=rr.Box2DFormat.XYXY,
                 class_ids=class_id,
                 show_labels=True,
-                labels="Hello",
             ),
             recording=recording,
         )

@@ -66,6 +66,9 @@ class AppState:
     shortest_timestamps: Int[ndarray, "n_frames"] | None = None
     """Per-frame timestamps shared across views, shortened for alignment."""
 
+    video_timestamps_by_path: dict[str, Int[np.ndarray, "n_frames"]] = field(default_factory=dict)
+    """Per-video frame timestamps keyed by Rerun entity path."""
+
     current_prediction: CurrentPrediction | None = None
     """Prediction data for the frame currently shown to the user."""
 
