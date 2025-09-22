@@ -1,7 +1,7 @@
 from dataclasses import dataclass, replace
 from pathlib import Path
 from timeit import default_timer as timer
-from typing import Literal
+from typing import Literal, NamedTuple
 
 import cv2
 import numpy as np
@@ -20,23 +20,14 @@ from monopriors.relative_depth_models import (
 from monopriors.relative_depth_models.base_relative_depth import BaseRelativePredictor
 from monopriors.scale_utils import compute_scale_and_shift
 from numpy import ndarray
+from rtmlib import YOLOX
 from sam2.sam2_image_predictor import SAM2ImagePredictor
 from simplecv.camera_orient_utils import auto_orient_and_center_poses
-from simplecv.camera_parameters import Extrinsics
+from simplecv.camera_parameters import Extrinsics, PinholeParameters
 from simplecv.ops.conventions import CameraConventions, convert_pose
 from simplecv.rerun_log_utils import RerunTyroConfig, log_pinhole, log_video
 from simplecv.video_io import MultiVideoReader
 from tqdm.auto import trange
-
-try:
-    from sam2.sam2_image_predictor import SAM2ImagePredictor
-except ImportError:
-    SAM2ImagePredictor = None  # type: ignore
-
-try:
-    from rtmlib import YOLOX
-except ImportError:
-    YOLOX = None  # type: ignore
 
 np.set_printoptions(suppress=True)
 
@@ -370,6 +361,156 @@ def segment_people(
         masks = cv2.dilate(masks.astype(np.uint8), kernel, iterations=1).astype(bool)
 
     return masks
+
+
+class MVCalibResults(NamedTuple):
+    pinhole_param_list: list[PinholeParameters]
+    pcd: o3d.geometry.PointCloud
+
+
+class MultiViewCalibrator:
+    """Orchestrates multi-view calibration by fusing depth, segmentation, and refinement models.
+
+    The calibrator runs VGGT to infer geometry per view, filters dynamic actors via
+    YOLOX + SAM2 segmentation, and optionally refines the predicted depths with the
+    Moge relative depth model before generating a consolidated Open3D point cloud.
+    """
+
+    def __init__(self, refine_depth_maps: bool = True) -> None:
+        """Instantiate the detector, segmenter, and depth estimators needed for calibration."""
+        self.device: str = "cuda"
+        self.det_model: YOLOX = YOLOX(
+            "https://download.openmmlab.com/mmpose/v1/projects/rtmposev1/onnx_sdk/yolox_m_8xb8-300e_humanart-c2c7a14a.zip",
+            model_input_size=(640, 640),
+            score_thr=0.7,
+            backend="onnxruntime",
+            device=self.device,
+        )
+
+        self.sam2_predictor: SAM2ImagePredictor = SAM2ImagePredictor.from_pretrained("facebook/sam2-hiera-large")
+        self.vggt_predictor: VGGTPredictor = VGGTPredictor(
+            device=self.device,
+            preprocessing_mode="pad",
+        )
+
+        self.refine_depth_maps: bool = refine_depth_maps
+        if self.refine_depth_maps:
+            self.moge_predictor: BaseRelativePredictor = get_relative_predictor("MogeV1Predictor")(device="cuda")
+
+    def __call__(
+        self,
+        rgb_list: list[UInt8[ndarray, "H W 3"]],
+    ) -> MVCalibResults:
+        """Estimate calibrated pinhole parameters and a fused point cloud from RGB views.
+
+        Args:
+            rgb_list: Ordered list of RGB frames captured at the same timestamp across cameras.
+
+        Returns:
+            MVCalibResults containing per-camera pinhole parameters and a down-sampled point cloud
+            reconstructed from high-confidence depth measurements (optionally refined by Moge).
+        """
+        mv_pred_list: list[MultiviewPred] = self.vggt_predictor(rgb_list)
+        mv_pred_list: list[MultiviewPred] = orient_mv_pred_list(mv_pred_list)
+
+        # Compute person segmentation masks per view. Keep for potential UI/analysis,
+        # but do not alter confidences/depth with it here.
+        segmask_list: list[Bool[np.ndarray, "H W"] | None] = []
+        for rgb in rgb_list:
+            bgr: UInt8[ndarray, "H W 3"] = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
+            people_masks: Bool[ndarray, "H W"] | None = segment_people(
+                bgr, det_model=self.det_model, sam_2_predictor=self.sam2_predictor, dilation=50
+            )
+            segmask_list.append(people_masks)
+
+        pointcloud: Float32[ndarray, "num_points 3"] = mv_pred_to_pointcloud(mv_pred_list)
+        rgb_stack: UInt8[ndarray, "num_points 3"] = np.concatenate(
+            [rearrange(mv_pred.rgb_image, "h w c -> (h w) c") for mv_pred in mv_pred_list]
+        )
+
+        # create depth confidence values using robust filtering for top keep percentile
+        depth_confidences: list[UInt8[ndarray, "H W"]] = [
+            robust_filter_confidences(mv_pred.confidence_mask, keep_top_percent=30) for mv_pred in mv_pred_list
+        ]
+
+        # update depth_confidences to exclude people, create a totally new list so it doesn't modify the original
+        new_depth_confidences = []
+        for depth_conf, segmask in zip(depth_confidences, segmask_list, strict=True):
+            if segmask is not None:
+                new_depth_confidences.append(depth_conf * ~segmask)
+            else:
+                new_depth_confidences.append(depth_conf)
+
+        depth_confidences = new_depth_confidences
+        pc_conf_mask: Bool[ndarray, "num_points"] = np.concatenate(
+            [rearrange(depth_conf, "h w -> (h w)") for depth_conf in depth_confidences]
+        ).astype(bool)
+
+        # Filter by confidence BEFORE downsampling for better quality and efficiency
+        filtered_points_pre_ds: Float32[ndarray, "filtered_points 3"] = pointcloud[pc_conf_mask]
+        filtered_colors_pre_ds: UInt8[ndarray, "filtered_points 3"] = rgb_stack[pc_conf_mask]
+
+        # Create point cloud from high-confidence points only
+        pcd: o3d.geometry.PointCloud = o3d.geometry.PointCloud()
+        pcd.points = o3d.utility.Vector3dVector(filtered_points_pre_ds)
+        pcd.colors = o3d.utility.Vector3dVector(filtered_colors_pre_ds / 255.0)  # Open3D expects [0,1] range
+
+        # Automatically determine optimal voxel size based on point cloud characteristics
+        voxel_size: float = estimate_voxel_size(filtered_points_pre_ds, target_points=200_000)
+        pcd_ds: o3d.geometry.PointCloud = pcd.voxel_down_sample(voxel_size)
+
+        if self.refine_depth_maps:
+            refined_depths_list: list[Float32[ndarray, "H W"]] = []
+
+        mv_pred: MultiviewPred
+        for mv_pred in mv_pred_list:
+            depth_map: Float32[ndarray, "H W"] = mv_pred.depth_map
+            depth_conf: UInt8[ndarray, "H W"] = depth_confidences[mv_pred_list.index(mv_pred)]
+            # Filter depth
+            filtered_depth_map: Float32[ndarray, "H W"] = np.where(depth_conf > 0, depth_map, 0)
+
+            if self.refine_depth_maps:
+                relative_pred: RelativeDepthPrediction = self.moge_predictor.__call__(
+                    rgb=mv_pred.rgb_image, K_33=mv_pred.pinhole_param.intrinsics.k_matrix
+                )
+
+                scale, shift = compute_scale_and_shift(
+                    relative_pred.depth, filtered_depth_map, mask=depth_conf > 0, scale_only=False
+                )
+                metric_depth: Float32[np.ndarray, "h w"] = relative_pred.depth.copy() * scale + shift
+                # filter depth
+                edges_mask: Bool[np.ndarray, "h w"] = depth_edges_mask(metric_depth, threshold=0.01)
+                metric_depth: Float32[np.ndarray, "h w"] = metric_depth * ~edges_mask
+                metric_depth = np.where(depth_conf > 0, metric_depth, 0)
+                # remove people from metric depth
+                if segmask_list[mv_pred_list.index(mv_pred)] is not None:
+                    metric_depth: Float32[np.ndarray, "h w"] = metric_depth * ~segmask_list[mv_pred_list.index(mv_pred)]
+
+                refined_depths_list.append(metric_depth)
+
+        if self.refine_depth_maps:
+            moge_points: Float32[ndarray, "num_points 3"] = mv_pred_to_pointcloud(
+                mv_pred_list, depth_list=refined_depths_list
+            )
+            new_pc: Float32[ndarray, "num_points 3"] = moge_points.reshape(-1, 3)
+            rgb_stack: UInt8[ndarray, "num_points 3"] = np.concatenate(
+                [rearrange(mv_pred.rgb_image, "h w c -> (h w) c") for mv_pred in mv_pred_list]
+            )
+
+            # Create point cloud from high-confidence points only
+            pcd: o3d.geometry.PointCloud = o3d.geometry.PointCloud()
+            pcd.points = o3d.utility.Vector3dVector(new_pc)
+            pcd.colors = o3d.utility.Vector3dVector(rgb_stack / 255.0)  # Open3D expects [0,1] range
+
+            # Automatically determine optimal voxel size based on point cloud characteristics
+            voxel_size: float = estimate_voxel_size(new_pc, target_points=500_000)
+            pcd_ds = pcd.voxel_down_sample(voxel_size)
+
+        mv_calib_results: MVCalibResults = MVCalibResults(
+            pinhole_param_list=[mv_pred.pinhole_param for mv_pred in mv_pred_list],
+            pcd=pcd_ds,
+        )
+        return mv_calib_results
 
 
 @dataclass

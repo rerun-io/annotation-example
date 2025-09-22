@@ -119,7 +119,7 @@ torchvision = { version = ">=0.20.1", index = "https://download.pytorch.org/whl/
 torchcodec = { version = ">=0.3", index = "https://download.pytorch.org/whl/cu128" }
 vggt = { git = "https://github.com/pablovela5620/vggt.git", rev = "5ed6ec88a951f27959f73bc72eb4b6dc7a028b0c" }
 monopriors = { git = "https://github.com/pablovela5620/monoprior.git", rev = "f6b54634189cf6f971593a47964c38494735f63f" }
-simplecv = { git = "https://github.com/pablovela5620/simplecv.git", rev = "e6559e7f91a45a2f1b94db6a27ab1735680dfa52" }
+simplecv = { git = "https://github.com/pablovela5620/simplecv.git", rev = "e49b4eb9d67fb13c83f840ee8783fdc3b74995d9" }
 moge = { git = "https://github.com/microsoft/MoGe.git" }
 rtmlib = { git = "https://github.com/pablovela5620/rtmlib.git", rev = "98bca2193c39b349034b280803b54c9ee58f7c68" }
 wilor-nano = { git = "https://github.com/pablovela5620/wilor-nano.git", rev = "c1ed027a8dff05f017aee8f826b7ae456cb1e611" }
