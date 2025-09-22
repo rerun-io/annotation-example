@@ -593,7 +593,7 @@ environments:
       - pypi: git+https://github.com/pablovela5620/vggt.git?rev=5ed6ec88a951f27959f73bc72eb4b6dc7a028b0c#5ed6ec88a951f27959f73bc72eb4b6dc7a028b0c
       - pypi: https://files.pythonhosted.org/packages/5a/84/44687a29792a70e111c5c477230a72c4b957d88d16141199bf9acb7537a3/websocket_client-1.8.0-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/14/8f/aa61f528fba38578ec553c145857a181384c72b98156f858ca5c8e82d9d3/websockets-15.0.1-cp312-cp312-manylinux_2_5_x86_64.manylinux1_x86_64.manylinux_2_17_x86_64.manylinux2014_x86_64.whl
-      - pypi: git+https://github.com/pablovela5620/wilor-nano.git?rev=c1ed027a8dff05f017aee8f826b7ae456cb1e611#c1ed027a8dff05f017aee8f826b7ae456cb1e611
+      - pypi: git+https://github.com/pablovela5620/wilor-nano.git?rev=70d01f333960113f825d2f7994a85fce5c51d61a#70d01f333960113f825d2f7994a85fce5c51d61a
       - pypi: https://files.pythonhosted.org/packages/37/81/6acd6601f61e31cfb8729d3da6d5df966f80f374b78eff83760714487338/yapf-0.43.0-py3-none-any.whl
       - pypi: ./
   dev:
@@ -1195,7 +1195,7 @@ environments:
       - pypi: git+https://github.com/pablovela5620/vggt.git?rev=5ed6ec88a951f27959f73bc72eb4b6dc7a028b0c#5ed6ec88a951f27959f73bc72eb4b6dc7a028b0c
       - pypi: https://files.pythonhosted.org/packages/5a/84/44687a29792a70e111c5c477230a72c4b957d88d16141199bf9acb7537a3/websocket_client-1.8.0-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/14/8f/aa61f528fba38578ec553c145857a181384c72b98156f858ca5c8e82d9d3/websockets-15.0.1-cp312-cp312-manylinux_2_5_x86_64.manylinux1_x86_64.manylinux_2_17_x86_64.manylinux2014_x86_64.whl
-      - pypi: git+https://github.com/pablovela5620/wilor-nano.git?rev=c1ed027a8dff05f017aee8f826b7ae456cb1e611#c1ed027a8dff05f017aee8f826b7ae456cb1e611
+      - pypi: git+https://github.com/pablovela5620/wilor-nano.git?rev=70d01f333960113f825d2f7994a85fce5c51d61a#70d01f333960113f825d2f7994a85fce5c51d61a
       - pypi: https://files.pythonhosted.org/packages/37/81/6acd6601f61e31cfb8729d3da6d5df966f80f374b78eff83760714487338/yapf-0.43.0-py3-none-any.whl
       - pypi: ./
 packages:
@@ -1386,7 +1386,7 @@ packages:
 - pypi: ./
   name: annotation-example
   version: 0.1.0
-  sha256: 97cb6f28ab2a59f03f8c6ebf73a8f94e78d311e36dd44537a3c9bbafe0cd9705
+  sha256: 675574e52f87216c86d8065df578e43be2142bd7d1b3677a631a90b6ce05d676
   requires_dist:
   - mmcv-lite>=2.2.0,<2.3
   - build>=1.2.2.post1,<2
@@ -9324,7 +9324,7 @@ packages:
   - pkg:pypi/widgetsnbextension?source=hash-mapping
   size: 889285
   timestamp: 1744291155057
-- pypi: git+https://github.com/pablovela5620/wilor-nano.git?rev=c1ed027a8dff05f017aee8f826b7ae456cb1e611#c1ed027a8dff05f017aee8f826b7ae456cb1e611
+- pypi: git+https://github.com/pablovela5620/wilor-nano.git?rev=70d01f333960113f825d2f7994a85fce5c51d61a#70d01f333960113f825d2f7994a85fce5c51d61a
   name: wilor-nano
   version: 0.1.0
   requires_dist:

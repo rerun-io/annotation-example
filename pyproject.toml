@@ -122,7 +122,7 @@ monopriors = { git = "https://github.com/pablovela5620/monoprior.git", rev = "f6
 simplecv = { git = "https://github.com/pablovela5620/simplecv.git", rev = "e49b4eb9d67fb13c83f840ee8783fdc3b74995d9" }
 moge = { git = "https://github.com/microsoft/MoGe.git" }
 rtmlib = { git = "https://github.com/pablovela5620/rtmlib.git", rev = "98bca2193c39b349034b280803b54c9ee58f7c68" }
-wilor-nano = { git = "https://github.com/pablovela5620/wilor-nano.git", rev = "c1ed027a8dff05f017aee8f826b7ae456cb1e611" }
+wilor-nano = { git = "https://github.com/pablovela5620/wilor-nano.git", rev = "70d01f333960113f825d2f7994a85fce5c51d61a" }
 
 
 [tool.pixi.dependencies]

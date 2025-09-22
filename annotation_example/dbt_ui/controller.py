@@ -19,6 +19,7 @@ from simplecv.data.skeleton.mediapipe import MEDIAPIPE_ID2NAME, MEDIAPIPE_IDS, M
 from simplecv.rerun_log_utils import confidence_scores_to_rgb, log_pinhole, log_video
 from simplecv.video_io import MultiVideoReader
 from wilor_nano.hand_detection import DetectionResult
+from wilor_nano.hand_keypoints import KeypointResults
 
 from annotation_example.dbt_ui.dbt_callbacks import (
     _format_keypoint_status,
@@ -464,16 +465,12 @@ class Controller:
                     ts_idx = time_to_frame_idx(ts_nano, all_ts_nano)
 
             if ts_idx < 0:
-                camera_lookup_failures.append(
-                    f"Missing timestamp alignment for {video_entity_path.as_posix()}"
-                )
+                camera_lookup_failures.append(f"Missing timestamp alignment for {video_entity_path.as_posix()}")
                 continue
 
             frame_count: int = len(mv_reader)
             if frame_count == 0:
-                camera_lookup_failures.append(
-                    f"No frames available for {video_entity_path.as_posix()}"
-                )
+                camera_lookup_failures.append(f"No frames available for {video_entity_path.as_posix()}")
                 continue
             if ts_idx >= frame_count:
                 camera_lookup_failures.append(
@@ -501,12 +498,11 @@ class Controller:
 
             rgb_hw3: UInt8[ndarray, "h w 3"] = rgb_list[camera_idx]
 
-            kpts_results: tuple[
-                Float[ndarray, "n_frames=1 n_kpts=21 2"],
-                Float[ndarray, "n_frames=1 n_kpts=21"],
-            ] = self.engine.hand_keypoint_engine(image=rgb_hw3, xyxy=box_xyxy.tolist())
-            uv: Float[ndarray, "n_frames=1 n_kpts=21 2"] = kpts_results[0]
-            conf: Float[ndarray, "n_frames=1 n_kpts=21"] = kpts_results[1]
+            kpts_results: KeypointResults = self.engine.hand_keypoint_engine(
+                rgb_hw3=rgb_hw3, xyxy=box_xyxy, handedness=hand_literal
+            )
+            uv: Float[ndarray, "n_frames=1 n_kpts=21 2"] = kpts_results.keypoints_2d
+            conf: Float[ndarray, "n_frames=1 n_kpts=21"] = kpts_results.scores
             conf_colors: UInt8[ndarray, "n_frames=1 n_kpts=21 3"] = confidence_scores_to_rgb(
                 confidence_scores=conf[..., np.newaxis]
             )

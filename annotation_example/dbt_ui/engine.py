@@ -22,7 +22,12 @@ from simplecv.rerun_log_utils import confidence_scores_to_rgb
 from simplecv.video_io import MultiVideoReader
 from tqdm import tqdm
 from wilor_nano.hand_detection import DetectionResult, HandDetector, HandDetectorConfig
-from wilor_nano.hand_keypoints import HandKeypointDetectorConfig, RTMPoseHandKeypointDetector
+from wilor_nano.hand_keypoints import (
+    HandKeypointDetectorConfig,
+    KeypointResults,
+    RTMPoseHandKeypointDetector,
+    WilorHandKeypointDetector,
+)
 
 from annotation_example.api.calibrate_mv_videos import (
     compute_scale_and_shift,
@@ -188,10 +193,13 @@ class Engine:
 
     def __init__(
         self,
-    ):
+    ) -> None:
         self.hand_detection_engine = HandDetector(HandDetectorConfig(verbose=False))
-        # self.hand_keypoint_engine = WilorHandKeypointDetector(HandKeypointDetectorConfig(verbose=False))
-        self.hand_keypoint_engine = RTMPoseHandKeypointDetector(HandKeypointDetectorConfig(verbose=False))
+        kpt_network: Literal["wilor", "rtmpose"] = "wilor"
+        if kpt_network == "wilor":
+            self.hand_keypoint_engine = WilorHandKeypointDetector(HandKeypointDetectorConfig(verbose=False))
+        elif kpt_network == "rtmpose":
+            self.hand_keypoint_engine = RTMPoseHandKeypointDetector(HandKeypointDetectorConfig(verbose=False))
         self.mv_calibrator = MultiViewCalibrator()
         self._ego_mv_reader: MultiVideoReader | None = None
         self._exo_mv_reader: MultiVideoReader | None = None
@@ -227,13 +235,9 @@ class Engine:
             rr.log(f"{hand_path}_keypoints", rr.Clear(recursive=True), recording=recording)
             return None
 
-        xyxy_list: list[list[float]] = xyxy.tolist()
-        kpts_results: tuple[
-            Float[ndarray, "n_frames=1 n_kpts=21 2"],
-            Float[ndarray, "n_frames=1 n_kpts=21"],
-        ] = self.hand_keypoint_engine(image=rgb_hw3, xyxy=xyxy_list)
-        uv: Float[ndarray, "n_frames=1 n_kpts=21 2"] = kpts_results[0]
-        conf: Float[ndarray, "n_frames=1 n_kpts=21"] = kpts_results[1]
+        kpts_results: KeypointResults = self.hand_keypoint_engine(rgb_hw3=rgb_hw3, xyxy=xyxy, handedness=hand)
+        uv: Float[ndarray, "n_frames=1 n_kpts=21 2"] = kpts_results.keypoints_2d
+        conf: Float[ndarray, "n_frames=1 n_kpts=21"] = kpts_results.scores
         conf_colors: UInt8[ndarray, "n_frames=1 n_kpts=21 3"] = confidence_scores_to_rgb(
             confidence_scores=conf[..., np.newaxis]
         )
