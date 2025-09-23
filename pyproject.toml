@@ -113,13 +113,15 @@ description = "Downloads an example assembly101 dataset from huggingface"
 
 [tool.pixi.pypi-dependencies]
 annotation_example = { path = ".", editable = true }
+jax = ">=0.6.0,<0.7"
+jaxopt = ">=0.8.5,<0.9"
 sam-2 = { git = "https://github.com/facebookresearch/segment-anything-2.git", rev = "2b90b9f5ceec907a1c18123530e92e794ad901a4" }
 torch = { version = ">=2.7.0", index = "https://download.pytorch.org/whl/cu128" }
 torchvision = { version = ">=0.20.1", index = "https://download.pytorch.org/whl/cu128" }
 torchcodec = { version = ">=0.3", index = "https://download.pytorch.org/whl/cu128" }
 vggt = { git = "https://github.com/pablovela5620/vggt.git", rev = "5ed6ec88a951f27959f73bc72eb4b6dc7a028b0c" }
 monopriors = { git = "https://github.com/pablovela5620/monoprior.git", rev = "f6b54634189cf6f971593a47964c38494735f63f" }
-simplecv = { git = "https://github.com/pablovela5620/simplecv.git", rev = "e49b4eb9d67fb13c83f840ee8783fdc3b74995d9" }
+simplecv = { git = "https://github.com/pablovela5620/simplecv.git", rev = "af72c1353e50df52be28f0de151bebcac06ea87a" }
 moge = { git = "https://github.com/microsoft/MoGe.git" }
 rtmlib = { git = "https://github.com/pablovela5620/rtmlib.git", rev = "98bca2193c39b349034b280803b54c9ee58f7c68" }
 wilor-nano = { git = "https://github.com/pablovela5620/wilor-nano.git", rev = "70d01f333960113f825d2f7994a85fce5c51d61a" }

@@ -13,8 +13,23 @@ from jaxtyping import Float, Int, UInt8
 from natsort import natsorted
 from numpy import ndarray
 from simplecv.camera_parameters import PinholeParameters
-from simplecv.rerun_log_utils import RerunTyroConfig, log_pinhole, log_video
+from simplecv.data.skeleton.mediapipe import MEDIAPIPE_ID2NAME, MEDIAPIPE_IDS, MEDIAPIPE_LINKS
+from simplecv.ops.mano.optim_jax_single_shape import (
+    OptimShapeInput,
+    OptimShapeResult,
+    PoseShapeOptimConfig,
+    SingleHandShapeOptim,
+)
+from simplecv.rerun_log_utils import (
+    Points2DWithConfidence,
+    RerunTyroConfig,
+    confidence_scores_to_rgb,
+    log_pinhole,
+    log_video,
+)
 from simplecv.video_io import MultiVideoReader
+from wilor_nano.hand_detection import DetectionResult, HandDetector, HandDetectorConfig
+from wilor_nano.hand_keypoints import HandKeypointDetectorConfig, KeypointResults, WilorHandKeypointDetector
 
 from annotation_example.api.calibrate_mv_videos import MultiViewCalibrator, MVCalibResults
 from annotation_example.rr_blueprints import create_view_container
@@ -62,6 +77,32 @@ def frame_index_to_timestamp(frame_timestamps_ns: Int[ndarray, "num_frames"], fr
         raise IndexError(msg)
     timestamp_ns: int = int(frame_timestamps_ns[frame_index])
     return timestamp_ns
+
+
+def set_annotation_context(recording: rr.RecordingStream | None = None) -> None:
+    rr.log(
+        "/",
+        rr.AnnotationContext(
+            [
+                rr.ClassDescription(
+                    info=rr.AnnotationInfo(id=0, label="L", color=(0, 0, 255)),
+                    keypoint_annotations=[
+                        rr.AnnotationInfo(id=id, label=name) for id, name in MEDIAPIPE_ID2NAME.items()
+                    ],
+                    keypoint_connections=MEDIAPIPE_LINKS,
+                ),
+                rr.ClassDescription(
+                    info=rr.AnnotationInfo(id=1, label="R", color=(255, 0, 0)),
+                    keypoint_annotations=[
+                        rr.AnnotationInfo(id=id, label=name) for id, name in MEDIAPIPE_ID2NAME.items()
+                    ],
+                    keypoint_connections=MEDIAPIPE_LINKS,
+                ),
+            ]
+        ),
+        static=True,
+        recording=recording,
+    )
 
 
 @dataclass
@@ -229,6 +270,7 @@ def main(config: HandCalibConfig) -> None:
     )
     blueprint: rrb.Blueprint = rrb.Blueprint(final_container, collapse_panels=True)
     rr.send_blueprint(blueprint=blueprint)
+    set_annotation_context()
     rr.log(f"{parent_log_path}", rr.ViewCoordinates.RFU, static=True)
     rr.set_time(timeline, duration=0)
 
@@ -265,5 +307,57 @@ def main(config: HandCalibConfig) -> None:
     ################################
     # 3. Calibrate Mano Parameters #
     ################################
+    hand_detection_engine = HandDetector(HandDetectorConfig(verbose=False))
+    hand_keypoint_engine = WilorHandKeypointDetector(HandKeypointDetectorConfig(verbose=False))
+
+    for camera_idx, (rgb_hw3, pinhole) in enumerate(zip(rgb_list, pinhole_param_list, strict=True)):
+        rr.set_time(timeline=timeline, duration=config.ts_nano * 1e-9 if config.ts_nano is not None else 0)
+        det_result: DetectionResult = hand_detection_engine(rgb_hw3=rgb_hw3, hand_conf=0.3)
+        left_xyxy: Float[ndarray, "1 4"] | None = det_result.left_xyxy
+        right_xyxy: Float[ndarray, "1 4"] | None = det_result.right_xyxy
+
+        pinhole_path = parent_log_path / "exo" / f"camera_{camera_idx}" / "pinhole"
+        image_path = pinhole_path / "image"
+
+        for hand, xyxy in [("left", left_xyxy), ("right", right_xyxy)]:
+            if xyxy is None:
+                continue
+            hand_path: Path = image_path / hand
+
+            kpts_results: KeypointResults = hand_keypoint_engine(rgb_hw3=rgb_hw3, xyxy=xyxy, handedness=hand)
+            uv: Float[ndarray, "n_frames=1 n_kpts=21 2"] = kpts_results.keypoints_2d
+            conf: Float[ndarray, "n_frames=1 n_kpts=21"] = kpts_results.scores
+            conf_colors: UInt8[ndarray, "n_frames=1 n_kpts=21 3"] = confidence_scores_to_rgb(
+                confidence_scores=conf[..., np.newaxis]
+            )
+            conf_values: Float[np.ndarray, "n_kpts"] = conf[0].astype(np.float32)
+            mean_conf: float = float(np.nanmean(conf_values))
+            uv_filtered: Float[np.ndarray, "n_kpts 2"] = uv[0].copy()
+            if mean_conf < 0.5:
+                uv_filtered[:] = np.nan
+            else:
+                valid_mask: np.ndarray = conf_values >= 0.3
+                uv_filtered[~valid_mask] = np.nan
+
+            rr.log(
+                f"{hand_path}/bbox",
+                rr.Boxes2D(
+                    array=xyxy,
+                    array_format=rr.Box2DFormat.XYXY,
+                    class_ids=0 if hand == "left" else 1,
+                    show_labels=True,
+                ),
+            )
+            rr.log(
+                f"{hand_path}/keypoints",
+                Points2DWithConfidence(
+                    positions=uv_filtered,
+                    confidences=conf_values,
+                    class_ids=0 if hand == "left" else 1,
+                    keypoint_ids=MEDIAPIPE_IDS,
+                    show_labels=False,
+                    colors=conf_colors[0],
+                ),
+            )
 
     print(f"Inference completed in {timer() - start:.2f} seconds")
