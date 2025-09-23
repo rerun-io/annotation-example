@@ -52,34 +52,15 @@ SUPPORTED_IMAGE_EXTENSIONS = (".png", ".jpg", ".jpeg")
 device = "cuda" if torch.cuda.is_available() else "cpu"
 
 
-def timestamp_to_frame_index(
-    frame_timestamps_ns: Int[ndarray, "num_frames"],
-    target_timestamp_ns: int,
-) -> int:
-    """Map a nanosecond timestamp to the frame index at or immediately before it.
+def timestamp_to_frame_index(time_ns: int, frame_timestamps_ns: Int[ndarray, "num_frames"]) -> int:
+    """Map a timestamp (ns) to the closest frame idx at-or-before that time.
 
-    The frame timestamps originate from `rr.AssetVideo.read_frame_timestamps_nanos`, which
-    derives them from the video container timing. Those values are rarely exact multiples
-    of 1/FPS, so we consistently **floor** to the last frame that does not exceed the
-    requested timestamp.
+    The mapping mirrors how VideoFrameReference columns are generated from
+    AssetVideo.read_frame_timestamps_nanos().
     """
-    frame_times: Int[ndarray, "num_frames"] = frame_timestamps_ns
-    if frame_times.size == 0:
-        msg = "Cannot convert timestamp to frame index for an empty timestamp array"
-        raise ValueError(msg)
 
-    # Clamp to valid range before applying the rounding strategy.
-    if target_timestamp_ns <= int(frame_times[0]):
-        return 0
-
-    last_idx: int = int(frame_times.shape[0] - 1)
-    if target_timestamp_ns >= int(frame_times[last_idx]):
-        return last_idx
-
-    insert_pos: int = int(np.searchsorted(frame_times, target_timestamp_ns, side="right")) - 1
-    if insert_pos < 0:
-        return 0
-    return insert_pos
+    idx: int = int(np.searchsorted(frame_timestamps_ns, time_ns, side="right") - 1)
+    return max(0, min(idx, len(frame_timestamps_ns) - 1))
 
 
 def frame_index_to_timestamp(frame_timestamps_ns: Int[ndarray, "num_frames"], frame_index: int) -> int:
@@ -145,6 +126,8 @@ class HandCalibConfig:
     """Maximum number of frames to process. If None, all frames are processed."""
     output_dir: Path | None = None
     """Output directory for colmap version. If None, results are not saved."""
+    hand_side: Literal["left", "right"] = "right"
+    """Which hand to run the MANO optimization for."""
 
 
 class ParsedInputs(NamedTuple):
@@ -253,7 +236,7 @@ def parse_input(
         assert min_exo_ts is not None, "Timestamps are required for video inputs"
         if config.ts_nano is not None:
             ts_nanos: int = config.ts_nano
-            frame_index: int = timestamp_to_frame_index(min_exo_ts, ts_nanos)
+            frame_index: int = timestamp_to_frame_index(time_ns=ts_nanos, frame_timestamps_ns=min_exo_ts)
         else:
             frame_index = 0
         bgr_list = mv_reader[frame_index]
@@ -331,6 +314,8 @@ def main(config: HandCalibConfig) -> None:
 
     uvc_coco_list: list[Float[ndarray, "n_frames n_kpts=133 3"]] = []
     Pall_exo: Float[ndarray, "num_frames 3 4"] = np.stack([pinhole.projection_matrix for pinhole in pinhole_param_list])
+    right_hand_kpts: KeypointResults | None = None
+    left_hand_kpts: KeypointResults | None = None
     for camera_idx, rgb_hw3 in enumerate(rgb_list):
         rr.set_time(timeline=timeline, duration=config.ts_nano * 1e-9 if config.ts_nano is not None else 0)
         det_result: DetectionResult = hand_detection_engine(rgb_hw3=rgb_hw3, hand_conf=0.3)
@@ -353,13 +338,9 @@ def main(config: HandCalibConfig) -> None:
             mean_conf: float = float(np.nanmean(conf_values))
             uv_filtered: Float[np.ndarray, "n_kpts 2"] = uv[0].copy()
             # filter out low confidence points
-            if mean_conf < 0.5:
+            if mean_conf < 0.4:
                 uv_filtered[:] = np.nan
                 conf_values[:] = 0.0
-            else:
-                valid_mask: np.ndarray = conf_values >= 0.3
-                uv_filtered[~valid_mask] = np.nan
-                conf_values[~valid_mask] = 0.0
 
             conf_colors: UInt8[ndarray, "n_frames=1 n_kpts=21 3"] = confidence_scores_to_rgb(
                 confidence_scores=conf_values[np.newaxis, :, np.newaxis]
@@ -368,6 +349,10 @@ def main(config: HandCalibConfig) -> None:
             fill_idx = RIGHT_HAND_IDX if hand == "right" else LEFT_HAND_IDX
             uvc_coco[fill_idx, :2] = uv_filtered
             uvc_coco[fill_idx, 2] = conf_values
+            if hand == "right" and right_hand_kpts is None:
+                right_hand_kpts = kpts_results
+            if hand == "left" and left_hand_kpts is None:
+                left_hand_kpts = kpts_results
             rr.log(
                 f"{hand_path}/bbox",
                 rr.Boxes2D(
@@ -410,19 +395,59 @@ def main(config: HandCalibConfig) -> None:
         ),
     )
 
-    hand_side = "right"
+    hand_side: Literal["left", "right"] = config.hand_side
     n_frames_optim: int = 1
     uv_exo_stack: Float[ndarray, "n_frames=1 n_views n_kpts=133 2"] = uvc_coco_batch[np.newaxis, :, :, 0:2]
+    kpts_results_selected: KeypointResults | None = right_hand_kpts if hand_side == "right" else left_hand_kpts
+    if kpts_results_selected is None:
+        raise ValueError(f"No keypoint detections available for hand '{hand_side}'")
+
+    if kpts_results_selected.global_orient is None or kpts_results_selected.hand_pose is None:
+        so3_init: Float[ndarray, "b 48"] = np.zeros((n_frames_optim, 48), dtype=np.float32)
+    else:
+        global_orient: Float[ndarray, "b 1 3"] = kpts_results_selected.global_orient.astype(np.float32)
+        hand_pose: Float[ndarray, "b 15 3"] = kpts_results_selected.hand_pose.astype(np.float32)
+        so3_concat: Float[ndarray, "b 16 3"] = np.concatenate([global_orient, hand_pose], axis=1)
+        so3_init = so3_concat.reshape(so3_concat.shape[0], -1)
+        if so3_init.shape[0] != n_frames_optim:
+            if so3_init.shape[0] == 0:
+                so3_init = np.zeros((n_frames_optim, 48), dtype=np.float32)
+            else:
+                so3_init = np.broadcast_to(so3_init[0:1], (n_frames_optim, so3_init.shape[1])).astype(
+                    np.float32, copy=True
+                )
+        else:
+            so3_init = so3_init.astype(np.float32, copy=False)
+
+    hand_indices = RIGHT_HAND_IDX if hand_side == "right" else LEFT_HAND_IDX
+    hand_xyz: Float[ndarray, "n_hand 3"] = xyz[hand_indices]
+    hand_conf: Float[ndarray, "n_hand"] = conf_values[hand_indices]
+    valid_hand_mask: np.ndarray = hand_conf > 0.0
+    if np.any(valid_hand_mask):
+        trans_guess: Float[ndarray, "3"] = hand_xyz[valid_hand_mask].mean(axis=0).astype(np.float32)
+    else:
+        trans_guess = np.zeros((3,), dtype=np.float32)
+    trans_init: Float[ndarray, "b 3"] = np.broadcast_to(trans_guess, (n_frames_optim, 3)).astype(np.float32, copy=True)
+
     optim_shape_cfg = PoseShapeOptimConfig(
         Pall=Pall_exo, hand_side=hand_side, n_frames_optim=n_frames_optim, n_optim_iters=30
     )
     optimizer_shape = SingleHandShapeOptim(config=optim_shape_cfg)
-    # take the first 30 frames and feed them into the optimizer
+
+    if kpts_results_selected.betas is not None and kpts_results_selected.betas.size > 0:
+        betas_array = np.asarray(kpts_results_selected.betas, dtype=np.float32)
+        if betas_array.ndim == 1:
+            beta_init: Float[ndarray, "10"] = betas_array
+        else:
+            beta_init = betas_array[0]
+    else:
+        beta_init = np.zeros((10,), dtype=np.float32)
+
     optim_shape_input: OptimShapeInput = OptimShapeInput(
         uv_pred=uv_exo_stack[:n_frames_optim],
-        beta_init=np.zeros((10,), dtype=np.float32),
-        so3_init=np.zeros((n_frames_optim, 48), dtype=np.float32),
-        trans_init=np.array([[0.0, 0.0, 0.6]]).repeat(n_frames_optim, axis=0).astype(np.float32),
+        beta_init=beta_init,
+        so3_init=so3_init,
+        trans_init=trans_init,
     )
     optim_shape_tuple: tuple[OptimShapeResult, LevenbergMarquardtState] = optimizer_shape(optim_shape_input)
     optim_shape_result: OptimShapeResult = optim_shape_tuple[0]
