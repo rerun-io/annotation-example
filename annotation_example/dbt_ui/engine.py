@@ -18,7 +18,11 @@ from numpy import ndarray
 from simplecv.camera_parameters import PinholeParameters
 from simplecv.data.skeleton.mediapipe import MEDIAPIPE_IDS
 from simplecv.ops.triangulate import batch_triangulate
-from simplecv.rerun_log_utils import confidence_scores_to_rgb
+from simplecv.rerun_log_utils import (
+    Points2DWithConfidence,
+    Points3DWithConfidence,
+    confidence_scores_to_rgb,
+)
 from simplecv.video_io import MultiVideoReader
 from tqdm import tqdm
 from wilor_nano.hand_detection import DetectionResult, HandDetector, HandDetectorConfig
@@ -195,7 +199,7 @@ class Engine:
         self,
     ) -> None:
         self.hand_detection_engine = HandDetector(HandDetectorConfig(verbose=False))
-        kpt_network: Literal["wilor", "rtmpose"] = "wilor"
+        kpt_network: Literal["wilor", "rtmpose"] = "rtmpose"
         if kpt_network == "wilor":
             self.hand_keypoint_engine = WilorHandKeypointDetector(HandKeypointDetectorConfig(verbose=False))
         elif kpt_network == "rtmpose":
@@ -253,11 +257,13 @@ class Engine:
             ),
             recording=recording,
         )
+        uv_frame: Float[np.ndarray, "n_kpts 2"] = uv[0]
+        conf_values: Float[np.ndarray, "n_kpts"] = conf[0].astype(np.float32)
         rr.log(
             f"{hand_path}_keypoints",
-            rr.Points2D(
-                positions=uv[0],
-                # confidences=conf[0],
+            Points2DWithConfidence(
+                positions=uv_frame,
+                confidences=conf_values,
                 class_ids=class_id,
                 keypoint_ids=MEDIAPIPE_IDS,
                 show_labels=False,
@@ -265,10 +271,13 @@ class Engine:
             ),
             recording=recording,
         )
-        conf_values: Float[np.ndarray, "n_kpts"] = conf[0].astype(np.float32)
-        conf_values = np.where(conf_values >= KEYPOINT_CONFIDENCE_THRESHOLD, conf_values, 0.0)
+        conf_thresholded: Float[np.ndarray, "n_kpts"] = np.where(
+            conf_values >= KEYPOINT_CONFIDENCE_THRESHOLD,
+            conf_values,
+            0.0,
+        ).astype(np.float32)
         uv_conf: Float[np.ndarray, "n_kpts 3"] = np.concatenate(
-            (uv[0], conf_values[..., np.newaxis]),
+            (uv_frame, conf_thresholded[..., np.newaxis]),
             axis=-1,
         ).astype(np.float32)
         return uv_conf
@@ -373,10 +382,12 @@ class Engine:
                 confidence_scores=confidence_for_colors
             )
             colors: UInt8[np.ndarray, "n_kpts 3"] = colors_tensor[0]
+            confidence_values: Float[np.ndarray, "n_kpts"] = confidence.astype(np.float32)
             rr.log(
                 str(triangulation_root / f"{hand}_hand"),
-                rr.Points3D(
+                Points3DWithConfidence(
                     positions=positions,
+                    confidences=confidence_values,
                     colors=colors,
                     radii=0.005,
                     keypoint_ids=MEDIAPIPE_IDS,

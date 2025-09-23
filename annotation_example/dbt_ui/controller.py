@@ -16,7 +16,12 @@ from natsort import natsorted
 from numpy import ndarray
 from rerun.event import ContainerSelectionItem, EntitySelectionItem, ViewSelectionItem
 from simplecv.data.skeleton.mediapipe import MEDIAPIPE_ID2NAME, MEDIAPIPE_IDS, MEDIAPIPE_LINKS
-from simplecv.rerun_log_utils import confidence_scores_to_rgb, log_pinhole, log_video
+from simplecv.rerun_log_utils import (
+    Points2DWithConfidence,
+    confidence_scores_to_rgb,
+    log_pinhole,
+    log_video,
+)
 from simplecv.video_io import MultiVideoReader
 from wilor_nano.hand_detection import DetectionResult
 from wilor_nano.hand_keypoints import KeypointResults
@@ -535,8 +540,9 @@ class Controller:
             )
             rr.log(
                 f"{hand_path}_keypoints",
-                rr.Points2D(
+                Points2DWithConfidence(
                     positions=uv_filtered,
+                    confidences=conf_values,
                     class_ids=HAND_CLASS_IDS[hand_literal],
                     keypoint_ids=MEDIAPIPE_IDS,
                     show_labels=False,
@@ -686,10 +692,7 @@ class Controller:
 
         if state.current_prediction is not None and state.current_prediction.detection_results is not None:
             det: DetectionResult = state.current_prediction.detection_results
-            if selected_hand == "left":
-                det = replace(det, left_xyxy=None)
-            else:
-                det = replace(det, right_xyxy=None)
+            det = replace(det, left_xyxy=None) if selected_hand == "left" else replace(det, right_xyxy=None)
             new_pred: CurrentPrediction = replace(state.current_prediction, detection_results=det)
             new_state = replace(new_state, current_prediction=new_pred)
 
