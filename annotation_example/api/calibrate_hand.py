@@ -9,19 +9,31 @@ import open3d as o3d
 import rerun as rr
 import rerun.blueprint as rrb
 import torch
-from jaxtyping import Float, Int, UInt8
+from jaxopt._src.levenberg_marquardt import LevenbergMarquardtState
+from jaxtyping import Float, Float32, Int, UInt8
 from natsort import natsorted
 from numpy import ndarray
+from simplecv.apis.view_exoego import compute_vertex_normals_batch
 from simplecv.camera_parameters import PinholeParameters
+from simplecv.data.skeleton.coco_133 import (
+    COCO_133_ID2NAME,
+    COCO_133_IDS,
+    COCO_133_LINKS,
+    LEFT_HAND_IDX,
+    RIGHT_HAND_IDX,
+)
 from simplecv.data.skeleton.mediapipe import MEDIAPIPE_ID2NAME, MEDIAPIPE_IDS, MEDIAPIPE_LINKS
+from simplecv.ops.mano.mano_np import MANOLayerNP
 from simplecv.ops.mano.optim_jax_single_shape import (
     OptimShapeInput,
     OptimShapeResult,
     PoseShapeOptimConfig,
     SingleHandShapeOptim,
 )
+from simplecv.ops.triangulate import batch_triangulate
 from simplecv.rerun_log_utils import (
     Points2DWithConfidence,
+    Points3DWithConfidence,
     RerunTyroConfig,
     confidence_scores_to_rgb,
     log_pinhole,
@@ -97,6 +109,13 @@ def set_annotation_context(recording: rr.RecordingStream | None = None) -> None:
                         rr.AnnotationInfo(id=id, label=name) for id, name in MEDIAPIPE_ID2NAME.items()
                     ],
                     keypoint_connections=MEDIAPIPE_LINKS,
+                ),
+                rr.ClassDescription(
+                    info=rr.AnnotationInfo(id=2, label="Coco Wholebody", color=(0, 0, 255)),
+                    keypoint_annotations=[
+                        rr.AnnotationInfo(id=id, label=name) for id, name in COCO_133_ID2NAME.items()
+                    ],
+                    keypoint_connections=COCO_133_LINKS,
                 ),
             ]
         ),
@@ -310,7 +329,9 @@ def main(config: HandCalibConfig) -> None:
     hand_detection_engine = HandDetector(HandDetectorConfig(verbose=False))
     hand_keypoint_engine = WilorHandKeypointDetector(HandKeypointDetectorConfig(verbose=False))
 
-    for camera_idx, (rgb_hw3, pinhole) in enumerate(zip(rgb_list, pinhole_param_list, strict=True)):
+    uvc_coco_list: list[Float[ndarray, "n_frames n_kpts=133 3"]] = []
+    Pall_exo: Float[ndarray, "num_frames 3 4"] = np.stack([pinhole.projection_matrix for pinhole in pinhole_param_list])
+    for camera_idx, rgb_hw3 in enumerate(rgb_list):
         rr.set_time(timeline=timeline, duration=config.ts_nano * 1e-9 if config.ts_nano is not None else 0)
         det_result: DetectionResult = hand_detection_engine(rgb_hw3=rgb_hw3, hand_conf=0.3)
         left_xyxy: Float[ndarray, "1 4"] | None = det_result.left_xyxy
@@ -319,6 +340,7 @@ def main(config: HandCalibConfig) -> None:
         pinhole_path = parent_log_path / "exo" / f"camera_{camera_idx}" / "pinhole"
         image_path = pinhole_path / "image"
 
+        uvc_coco: Float[ndarray, "133 3"] = np.full((133, 3), np.nan, dtype=np.float32)
         for hand, xyxy in [("left", left_xyxy), ("right", right_xyxy)]:
             if xyxy is None:
                 continue
@@ -327,18 +349,25 @@ def main(config: HandCalibConfig) -> None:
             kpts_results: KeypointResults = hand_keypoint_engine(rgb_hw3=rgb_hw3, xyxy=xyxy, handedness=hand)
             uv: Float[ndarray, "n_frames=1 n_kpts=21 2"] = kpts_results.keypoints_2d
             conf: Float[ndarray, "n_frames=1 n_kpts=21"] = kpts_results.scores
-            conf_colors: UInt8[ndarray, "n_frames=1 n_kpts=21 3"] = confidence_scores_to_rgb(
-                confidence_scores=conf[..., np.newaxis]
-            )
             conf_values: Float[np.ndarray, "n_kpts"] = conf[0].astype(np.float32)
             mean_conf: float = float(np.nanmean(conf_values))
             uv_filtered: Float[np.ndarray, "n_kpts 2"] = uv[0].copy()
+            # filter out low confidence points
             if mean_conf < 0.5:
                 uv_filtered[:] = np.nan
+                conf_values[:] = 0.0
             else:
                 valid_mask: np.ndarray = conf_values >= 0.3
                 uv_filtered[~valid_mask] = np.nan
+                conf_values[~valid_mask] = 0.0
 
+            conf_colors: UInt8[ndarray, "n_frames=1 n_kpts=21 3"] = confidence_scores_to_rgb(
+                confidence_scores=conf_values[np.newaxis, :, np.newaxis]
+            )
+
+            fill_idx = RIGHT_HAND_IDX if hand == "right" else LEFT_HAND_IDX
+            uvc_coco[fill_idx, :2] = uv_filtered
+            uvc_coco[fill_idx, 2] = conf_values
             rr.log(
                 f"{hand_path}/bbox",
                 rr.Boxes2D(
@@ -359,5 +388,66 @@ def main(config: HandCalibConfig) -> None:
                     colors=conf_colors[0],
                 ),
             )
+        uvc_coco_list.append(uvc_coco)
+    # triangulate
+    uvc_coco_batch: Float[ndarray, "n_views n_kpts=133 3"] = np.stack(uvc_coco_list)
+    # can't be nan as it messes with triangulation, so convert everywhere thats a nan to zero
+    uvc_triangulate_batch: Float[ndarray, "n_views n_kpts=133 3"] = np.nan_to_num(uvc_coco_batch.copy(), nan=0.0)
+    xyzc: Float[ndarray, "n_kpts=133 4"] = batch_triangulate(uvc_triangulate_batch, Pall_exo, min_views=2)
+    xyz: Float[ndarray, "n_kpts=133 3"] = xyzc[:, :3]
+    conf_values: Float[ndarray, "n_kpts"] = xyzc[:, 3]
+    conf_colors: UInt8[ndarray, "1 n_kpts 3"] = confidence_scores_to_rgb(conf_values[:, np.newaxis][np.newaxis, ...])
 
+    rr.log(
+        f"{parent_log_path}/wb_keypoints",
+        Points3DWithConfidence(
+            positions=xyz,
+            confidences=conf_values,
+            class_ids=2,
+            keypoint_ids=COCO_133_IDS,
+            show_labels=False,
+            colors=conf_colors[0],
+        ),
+    )
+
+    hand_side = "right"
+    n_frames_optim: int = 1
+    uv_exo_stack: Float[ndarray, "n_frames=1 n_views n_kpts=133 2"] = uvc_coco_batch[np.newaxis, :, :, 0:2]
+    optim_shape_cfg = PoseShapeOptimConfig(
+        Pall=Pall_exo, hand_side=hand_side, n_frames_optim=n_frames_optim, n_optim_iters=30
+    )
+    optimizer_shape = SingleHandShapeOptim(config=optim_shape_cfg)
+    # take the first 30 frames and feed them into the optimizer
+    optim_shape_input: OptimShapeInput = OptimShapeInput(
+        uv_pred=uv_exo_stack[:n_frames_optim],
+        beta_init=np.zeros((10,), dtype=np.float32),
+        so3_init=np.zeros((n_frames_optim, 48), dtype=np.float32),
+        trans_init=np.array([[0.0, 0.0, 0.6]]).repeat(n_frames_optim, axis=0).astype(np.float32),
+    )
+    optim_shape_tuple: tuple[OptimShapeResult, LevenbergMarquardtState] = optimizer_shape(optim_shape_input)
+    optim_shape_result: OptimShapeResult = optim_shape_tuple[0]
+
+    beta_optim: Float[ndarray, "10"] = optim_shape_result.beta_optim
+    mano_layer = MANOLayerNP(side=hand_side, betas=beta_optim)
+
+    mano_outputs: tuple[
+        Float32[ndarray, "n_frames n_verts=778 3"],
+        Float32[ndarray, "n_frames n_joints=21 3"],
+    ] = mano_layer(optim_shape_result.so3_optim, optim_shape_result.trans_optim)
+    verts: Float32[ndarray, "n_frames n_verts=778 3"] = mano_outputs[0]
+    _: Float32[ndarray, "n_frames n_joints=21 3"] = mano_outputs[1]
+
+    verts_np: Float32[ndarray, "n_frames n_verts=778 3"] = verts
+    faces_np: Int[ndarray, "n_faces=1538 3"] = mano_layer.f.astype(np.int32)
+    vertex_normals: Float32[ndarray, "n_frames n_verts=778 3"] = compute_vertex_normals_batch(verts_np[0:1], faces_np)
+
+    rr.log(
+        f"{parent_log_path}/{hand_side}_hand_mano",
+        rr.Mesh3D(
+            vertex_positions=verts_np[0],
+            triangle_indices=faces_np,
+            vertex_normals=vertex_normals[0],
+            albedo_factor=(0, 0, 255, 255),
+        ),
+    )
     print(f"Inference completed in {timer() - start:.2f} seconds")
