@@ -110,12 +110,14 @@ class HandCalibratorConfig:
 
     hand_side: Literal["left", "right"] = "right"
     """Which hand to optimize with MANO—either "left" or "right"."""
-    detection_confidence: float = 0.5
+    detection_confidence: float = 0.3
     """Minimum detector confidence required to keep a hand bounding box."""
     ts_nano: int | None = None
     """Optional absolute timestamp in nanoseconds to sample; defaults to first frame when ``None``."""
     mano_optim_iters: int = 30
     """Number of Levenberg-Marquardt iterations for MANO pose/shape fitting."""
+    verbose: bool = True
+    """Whether to log additional intermediate results for debugging purposes."""
 
 
 @dataclass
@@ -169,7 +171,6 @@ class HandCalibrator:
         timeline: str,
     ) -> HandCalibrationResult:
         calibration_root: Path = parent_log_path / "hand_calibration"
-
         target_ts_nano: int = (
             self.config.ts_nano if self.config.ts_nano is not None else frame_index_to_timestamp(shortest_timestamp, 0)
         )
@@ -184,9 +185,11 @@ class HandCalibrator:
             msg = f"Mismatch between RGB frames and exo cameras: {len(rgb_list)} frames vs {len(exo_cam_list)} cameras"
             raise ValueError(msg)
 
+        pinhole_param_list: list[PinholeParameters] = exo_cam_list
+
         parsed_detections: ParsedDetections = self._detect_keypoints(
             rgb_list=rgb_list,
-            pinhole_param_list=exo_cam_list,
+            pinhole_param_list=pinhole_param_list,
             parent_log_path=parent_log_path,
             timeline=timeline,
             timestamp_seconds=frame_timestamp_seconds,
@@ -197,7 +200,7 @@ class HandCalibrator:
             Float[ndarray, "n_kpts=133"],
         ] = self._triangulate_keypoints(
             parsed_detections.uvc_coco_batch,
-            exo_cam_list,
+            pinhole_param_list,
             calibration_root=calibration_root,
         )
         xyz: Float[ndarray, "n_kpts=133 3"]
@@ -211,7 +214,7 @@ class HandCalibrator:
             xyz=xyz,
             confidences=conf_values,
             parsed_detections=parsed_detections,
-            pinhole_param_list=exo_cam_list,
+            pinhole_param_list=pinhole_param_list,
             calibration_root=calibration_root,
             timeline=timeline,
             timestamp_seconds=frame_timestamp_seconds,
@@ -220,7 +223,7 @@ class HandCalibrator:
         return HandCalibrationResult(
             frame_index=frame_index,
             timestamp_ns=frame_timestamp_ns,
-            pinhole_param_list=exo_cam_list,
+            pinhole_param_list=pinhole_param_list,
             xyz=xyz,
             confidences=conf_values,
             # mano_vertices=mano_vertices,
@@ -447,68 +450,70 @@ class HandCalibrator:
         optim_shape_tuple: tuple[OptimShapeResult, LevenbergMarquardtState] = optimizer_shape(optim_shape_input)
         optim_shape_result: OptimShapeResult = optim_shape_tuple[0]
 
-        beta_optim: Float[ndarray, "10"] = optim_shape_result.beta_optim
+        beta_optim: Float[ndarray, "10"] = optim_shape_result.beta_optim.astype(np.float32, copy=False)
+
+        mano_init_layer = MANOLayerNP(side=hand_side, betas=beta_init.astype(np.float32, copy=False))
         mano_optim_layer = MANOLayerNP(side=hand_side, betas=beta_optim)
-        mano_optim: tuple[
-            Float32[ndarray, "n_frames n_verts=778 3"],
-            Float32[ndarray, "n_frames n_joints=21 3"],
-        ] = mano_optim_layer(optim_shape_result.so3_optim, optim_shape_result.trans_optim)
 
-        mano_init_layer = MANOLayerNP(side=hand_side, betas=beta_init)
-        mano_init: tuple[
-            Float32[ndarray, "n_frames n_verts=778 3"],
-            Float32[ndarray, "n_frames n_joints=21 3"],
-        ] = mano_init_layer(so3_init, trans_init)
+        verts_init, joints_init = mano_init_layer(
+            so3_init.astype(np.float32, copy=False),
+            trans_init.astype(np.float32, copy=False),
+        )
+        verts_optim, joints_optim = mano_optim_layer(
+            optim_shape_result.so3_optim.astype(np.float32, copy=False),
+            optim_shape_result.trans_optim.astype(np.float32, copy=False),
+        )
 
-        verts_init: Float32[ndarray, "n_frames n_verts=778 3"] = mano_init[0]
-        joints_init: Float32[ndarray, "n_frames n_joints=21 3"] = mano_init[1]
-        faces_np: Int[ndarray, "n_faces=1538 3"] = mano_init_layer.f.astype(np.int32)
+        faces_np: Int[ndarray, "n_faces=1538 3"] = mano_optim_layer.f.astype(np.int32)
         normals_init: Float32[ndarray, "n_frames n_verts=778 3"] = compute_vertex_normals_batch(
             verts_init[0:1], faces_np
+        )
+        normals_optim: Float32[ndarray, "n_frames n_verts=778 3"] = compute_vertex_normals_batch(
+            verts_optim[0:1], faces_np
         )
 
         mano_mesh_path: Path = calibration_root / f"{hand_side}_mano_mesh"
         mano_joint_path: Path = calibration_root / f"{hand_side}_mano_xyz"
 
-        rr.log(
-            f"{mano_mesh_path}_init",
-            rr.Mesh3D(
-                vertex_positions=verts_init,
-                triangle_indices=faces_np,
-                vertex_normals=normals_init[0],
-                albedo_factor=(0, 0, 255, 255),
-            ),
-        )
+        triangulated_hand: Float[ndarray, "n_joints=21 3"] = xyz[hand_indices]
+        verts_aligned_init: Float32[ndarray, "n_verts=778 3"] = verts_init[0]
+        joints_aligned_init: Float32[ndarray, "n_joints=21 3"] = joints_init[0]
+        verts_aligned_optim: Float32[ndarray, "n_verts=778 3"] = verts_optim[0]
+        joints_aligned_optim: Float32[ndarray, "n_joints=21 3"] = joints_optim[0]
 
-        verts_optim: Float32[ndarray, "n_frames n_verts=778 3"] = mano_optim[0]
-        joints_optim: Float32[ndarray, "n_frames n_joints=21 3"] = mano_optim[1]
-        normals_optim: Float32[ndarray, "n_frames n_verts=778 3"] = compute_vertex_normals_batch(
-            verts_optim[0:1], faces_np
-        )
+        if self.config.verbose:
+            rr.log(
+                f"{mano_mesh_path}_init",
+                rr.Mesh3D(
+                    vertex_positions=verts_aligned_init,
+                    triangle_indices=faces_np,
+                    vertex_normals=normals_init[0],
+                    albedo_factor=(255, 0, 0, 255),
+                ),
+            )
         rr.log(
             f"{mano_mesh_path}_optim",
             rr.Mesh3D(
-                vertex_positions=verts_optim,
+                vertex_positions=verts_aligned_optim,
                 triangle_indices=faces_np,
                 vertex_normals=normals_optim[0],
-                albedo_factor=(255, 0, 0, 255),
+                albedo_factor=(0, 0, 255, 255),
+            ),
+        )
+        class_id: int = 1 if hand_side == "right" else 0
+        class_ids: Int[ndarray, "n_joints=21"] = np.full((joints_aligned_optim.shape[0],), class_id, dtype=np.int32)
+        keypoint_ids: Int[ndarray, "n_joints=21"] = np.asarray(MEDIAPIPE_IDS, dtype=np.int32)
+        rr.log(
+            f"{mano_joint_path}",
+            rr.Points3D(
+                joints_aligned_optim,
+                class_ids=class_ids,
+                keypoint_ids=keypoint_ids,
+                show_labels=False,
             ),
         )
 
-        # class_id: int = 1 if hand_side == "right" else 0
-        # class_ids: Int[ndarray, "n_joints=21"] = np.full((joints.shape[1],), class_id, dtype=np.int32)
-        # keypoint_ids: Int[ndarray, "n_joints=21"] = np.asarray(MEDIAPIPE_IDS, dtype=np.int32)
-        # rr.log(
-        #     f"{mano_joint_path}",
-        #     rr.Points3D(
-        #         joints_aligned,
-        #         class_ids=class_ids,
-        #         keypoint_ids=keypoint_ids,
-        #         show_labels=False,
-        #     ),
-        # )
-
-        return verts_optim, joints_optim, faces_np
+        return verts_aligned_optim, joints_aligned_optim, faces_np
 
 
 @dataclass
@@ -523,6 +528,57 @@ class BenchmarkHandCalibConfig:
     """Whether to stream ground-truth labels alongside calibration outputs."""
     hand_calibrator: HandCalibratorConfig = field(default_factory=HandCalibratorConfig)
     """Parameter bundle forwarded to the ``HandCalibrator`` instance."""
+
+
+def mv_reader_to_rgb_ts_batch(
+    mv_reader: MultiVideoReader,
+    num_frames: int,
+    ts_nanos: int,
+    frame_timestamps_ns: Int[ndarray, "n_frames"],
+) -> UInt8[ndarray, "n_frames n_views H W 3"]:
+    """Slice a timestamp-aligned RGB batch from a ``MultiVideoReader``.
+
+    Args:
+        mv_reader: Multi-camera video reader covering the synchronized views.
+        num_frames: Number of consecutive frames to fetch, inclusive of the
+            frame containing ``ts_nanos``.
+        ts_nanos: Absolute nanosecond timestamp selecting the first frame.
+        frame_timestamps_ns: Shared monotonic timestamp vector used to align
+            frame indices across views (commonly ``SceneSetupResult.shortest_timestamp``).
+
+    Returns:
+        ``UInt8[np.ndarray, "n_frames n_views H W 3"]`` containing the RGB
+        frames ordered by increasing timestamp and view index.
+
+    Raises:
+        ValueError: If there are no views, no frames, ``num_frames`` is not
+            positive, or the requested batch exceeds the available frames from
+            ``ts_nanos`` onward.
+    """
+
+    if num_frames <= 0:
+        raise ValueError("num_frames must be a positive integer")
+
+    total_frames: int = len(mv_reader)
+    n_views: int = len(mv_reader.video_readers)
+    if total_frames == 0 or n_views == 0:
+        raise ValueError("MultiVideoReader contains no frames or no views")
+
+    start_idx: int = timestamp_to_frame_index(ts_nanos, frame_timestamps_ns)
+    max_available_frames: int = total_frames - start_idx
+    if max_available_frames < num_frames:
+        raise ValueError("Requested number of frames exceeds available frames from the provided timestamp")
+
+    rgb_frames: list[UInt8[ndarray, "n_views H W 3"]] = []
+    for frame_offset in range(num_frames):
+        frame_idx: int = start_idx + frame_offset
+        bgr_list: list[UInt8[ndarray, "H W 3"]] = mv_reader[frame_idx]
+        rgb_views: list[UInt8[ndarray, "H W 3"]] = [cv2.cvtColor(bgr_hw3, cv2.COLOR_BGR2RGB) for bgr_hw3 in bgr_list]
+        rgb_views_stack: UInt8[ndarray, "n_views H W 3"] = np.stack(rgb_views, axis=0)
+        rgb_frames.append(rgb_views_stack)
+
+    rgb_ts_batch: UInt8[ndarray, "n_frames n_views H W 3"] = np.stack(rgb_frames, axis=0)
+    return rgb_ts_batch
 
 
 def main(config: BenchmarkHandCalibConfig) -> None:
