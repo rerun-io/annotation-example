@@ -123,6 +123,102 @@ class HandCalibratorConfig:
     """Whether to log additional intermediate results for debugging purposes."""
 
 
+def align_rotation(
+    xyz_mano: Float[ndarray, "n_kpts 3"], xyz_triangulated: Float[ndarray, "n_kpts 3"]
+) -> Float[ndarray, "3"]:
+    """Estimate MANO global orientation from triangulated joints using orthogonal Procrustes.
+
+    The returned rotation is a Rodrigues axis-angle vector compatible with the ``MANOLayerNP``
+    global orientation parameter. Following [Pavlakos et al. 2019], we align the template MANO
+    joints with the observed joints by matching the unit vectors from the wrist to the four
+    non-thumb MCP joints together with the hand normal. The optimal rotation in :math:`SO(3)` is
+    found via the SVD-based closed form solution to the orthogonal Procrustes problem.
+    """
+
+    root_idx: int = 0
+    finger_mcp_indices: tuple[int, int, int, int] = (5, 9, 13, 17)
+    eps: float = 1e-8
+
+    def compute_direction_matrix(xyz: Float[ndarray, "n_kpts 3"]) -> Float[ndarray, "3 5"]:
+        """Return normalized wrist-to-finger vectors and palm normal for a joint set."""
+
+        basis: Float[ndarray, "3 5"] = np.full((3, 5), np.nan, dtype=np.float64)
+        if xyz.shape[0] <= root_idx:
+            return basis
+
+        root: Float[ndarray, "3"] = xyz[root_idx].astype(np.float64, copy=False)
+        if not np.all(np.isfinite(root)):
+            return basis
+
+        for column_idx, joint_idx in enumerate(finger_mcp_indices):
+            if joint_idx >= xyz.shape[0]:
+                continue
+            joint: Float[ndarray, "3"] = xyz[joint_idx].astype(np.float64, copy=False)
+            if not np.all(np.isfinite(joint)):
+                continue
+            vector: Float[ndarray, "3"] = joint - root
+            length: float = float(np.linalg.norm(vector))
+            if length <= eps:
+                continue
+            basis[:, column_idx] = vector / length
+
+        valid_vectors: list[Float[ndarray, "3"]] = [
+            basis[:, col].copy() for col in range(4) if np.all(np.isfinite(basis[:, col]))
+        ]
+
+        normal: Float[ndarray, "3"] | None = None
+        if np.all(np.isfinite(basis[:, 0])) and np.all(np.isfinite(basis[:, 3])):
+            candidate: Float[ndarray, "3"] = np.cross(basis[:, 0], basis[:, 3])
+            candidate_norm: float = float(np.linalg.norm(candidate))
+            if candidate_norm > eps:
+                normal = candidate / candidate_norm
+        if normal is None:
+            for i in range(len(valid_vectors)):
+                for j in range(i + 1, len(valid_vectors)):
+                    candidate = np.cross(valid_vectors[i], valid_vectors[j])
+                    candidate_norm = float(np.linalg.norm(candidate))
+                    if candidate_norm > eps:
+                        normal = candidate / candidate_norm
+                        break
+                if normal is not None:
+                    break
+
+        if normal is not None:
+            basis[:, 4] = normal
+        return basis
+
+    mano_xyz_f64: Float[ndarray, "n_kpts 3"] = xyz_mano.astype(np.float64, copy=False)
+    triangulated_xyz_f64: Float[ndarray, "n_kpts 3"] = xyz_triangulated.astype(np.float64, copy=False)
+
+    mano_basis: Float[ndarray, "3 5"] = compute_direction_matrix(mano_xyz_f64)
+    triangulated_basis: Float[ndarray, "3 5"] = compute_direction_matrix(triangulated_xyz_f64)
+
+    valid_mask: np.ndarray = (~np.isnan(mano_basis).any(axis=0)) & (~np.isnan(triangulated_basis).any(axis=0))
+    valid_count: int = int(np.count_nonzero(valid_mask))
+    if valid_count < 2:
+        zero_rotation: Float32[ndarray, "3"] = np.zeros((3,), dtype=np.float32)
+        return zero_rotation
+
+    mano_basis_valid: Float[ndarray, "3 valid"] = mano_basis[:, valid_mask]
+    triangulated_basis_valid: Float[ndarray, "3 valid"] = triangulated_basis[:, valid_mask]
+
+    covariance: Float[ndarray, "3 3"] = triangulated_basis_valid @ mano_basis_valid.T
+    u_matrix: Float[ndarray, "3 3"]
+    vt_matrix: Float[ndarray, "3 3"]
+    u_matrix, _, vt_matrix = np.linalg.svd(covariance, full_matrices=True)
+
+    uv_t: Float[ndarray, "3 3"] = u_matrix @ vt_matrix
+    det_uv_t: float = float(np.linalg.det(uv_t))
+    corrected_diag: Float[ndarray, "3 3"] = np.eye(3, dtype=np.float64)
+    corrected_diag[2, 2] = 1.0 if det_uv_t >= 0.0 else -1.0
+
+    rotation_matrix: Float[ndarray, "3 3"] = u_matrix @ corrected_diag @ vt_matrix
+
+    rotvec_matrix: Float[ndarray, "3 1"] = cv2.Rodrigues(rotation_matrix.astype(np.float64, copy=False))[0]
+    rotation_vec: Float32[ndarray, "3"] = rotvec_matrix.reshape(-1).astype(np.float32, copy=False)
+    return rotation_vec
+
+
 @dataclass
 class HandCalibrationResult:
     """Outputs from a single calibration pass for downstream consumers."""
@@ -392,6 +488,63 @@ class HandCalibrator:
             np.float32, copy=True
         )
 
+        if kpts_results_selected.betas is not None and kpts_results_selected.betas.size > 0:
+            betas_array = np.asarray(kpts_results_selected.betas, dtype=np.float32)
+            if betas_array.ndim == 1:
+                beta_init: Float[ndarray, "10"] = betas_array
+            else:
+                beta_init = betas_array[0]
+        else:
+            beta_init = np.zeros((10,), dtype=np.float32)
+
+        mano_init_layer = MANOLayerNP(side=hand_side, betas=beta_init.astype(np.float32, copy=False))
+
+        so3_init_naive: Float32[ndarray, "b 48"] = so3_init.astype(np.float32, copy=True)
+        trans_init_f32: Float32[ndarray, "b 3"] = trans_init.astype(np.float32, copy=False)
+        verts_naive: Float32[ndarray, "n_frames n_verts=778 3"]
+        joints_naive: Float32[ndarray, "n_frames mp_kpts=21 3"]
+        verts_naive, joints_naive = mano_init_layer(so3_init_naive, trans_init_f32)
+
+        hand_xyz_masked: Float32[ndarray, "n_hand 3"] = hand_xyz.astype(np.float32, copy=True)
+        hand_xyz_masked[~valid_hand_mask] = np.nan
+        rotation_vec: Float32[ndarray, "3"] = align_rotation(joints_naive[0], hand_xyz_masked)
+        rotation_matrix_debug: Float[ndarray, "3 3"] = cv2.Rodrigues(rotation_vec)[0]
+        rotated_joints_debug: Float32[ndarray, "mp_kpts=21 3"] = (
+            (joints_naive[0] - joints_naive[0, 0]) @ rotation_matrix_debug.T
+        ) + joints_naive[0, 0]
+
+        valid_indices_debug: np.ndarray = np.isfinite(hand_xyz_masked).all(axis=1)
+        if np.any(valid_indices_debug):
+            translation_offset: Float32[ndarray, "3"] = (
+                np.nanmean(hand_xyz_masked[valid_indices_debug] - rotated_joints_debug[valid_indices_debug], axis=0)
+            ).astype(np.float32)
+        else:
+            translation_offset = np.zeros((3,), dtype=np.float32)
+
+        rotated_joints_debug = rotated_joints_debug + translation_offset[np.newaxis, :]
+
+        so3_init_aligned: Float32[ndarray, "b 48"] = so3_init_naive.copy()
+        for frame_idx in range(so3_init_aligned.shape[0]):
+            naive_rotvec: Float32[ndarray, "3"] = so3_init_naive[frame_idx, 0:3]
+            naive_matrix: Float[ndarray, "3 3"] = cv2.Rodrigues(naive_rotvec)[0]
+            composed_matrix: Float[ndarray, "3 3"] = rotation_matrix_debug @ naive_matrix
+            composed_rotvec: Float[ndarray, "3 1"] = cv2.Rodrigues(composed_matrix)[0]
+            so3_init_aligned[frame_idx, 0:3] = composed_rotvec.reshape(3).astype(np.float32)
+
+        verts_aligned_pre: Float32[ndarray, "n_frames n_verts=778 3"]
+        joints_aligned_pre: Float32[ndarray, "n_frames mp_kpts=21 3"]
+        verts_aligned_pre, joints_aligned_pre = mano_init_layer(so3_init_aligned, trans_init_f32)
+
+        root_delta: Float32[ndarray, "3"] = (joints_naive[0, 0] - joints_aligned_pre[0, 0]).astype(np.float32)
+        trans_init_aligned: Float32[ndarray, "b 3"] = trans_init_f32 + root_delta[np.newaxis, :] + translation_offset[np.newaxis, :]
+
+        verts_aligned_init: Float32[ndarray, "n_frames n_verts=778 3"]
+        joints_aligned_init: Float32[ndarray, "n_frames mp_kpts=21 3"]
+        verts_aligned_init, joints_aligned_init = mano_init_layer(so3_init_aligned, trans_init_aligned)
+
+        so3_init = so3_init_aligned
+        trans_init = trans_init_aligned
+
         optim_shape_cfg = PoseShapeOptimConfig(
             Pall=Pall_exo,
             hand_side=hand_side,
@@ -399,15 +552,6 @@ class HandCalibrator:
             n_optim_iters=self.config.mano_optim_iters,
         )
         optimizer_shape = SingleHandShapeOptim(config=optim_shape_cfg)
-
-        if kpts_results_selected.betas is not None and kpts_results_selected.betas.size > 0:
-            betas_array = np.asarray(kpts_results_selected.betas, dtype=np.float32)
-            if betas_array.ndim == 1:
-                beta_init: Float[ndarray, "10"] = betas_array
-            else:
-                beta_init: Float[ndarray, "10"] = betas_array[0]
-        else:
-            beta_init = np.zeros((10,), dtype=np.float32)
 
         optim_shape_input: OptimShapeInput = OptimShapeInput(
             uv_pred=uv_exo_stack,
@@ -420,21 +564,19 @@ class HandCalibrator:
 
         beta_optim: Float[ndarray, "10"] = optim_shape_result.beta_optim.astype(np.float32, copy=False)
 
-        mano_init_layer = MANOLayerNP(side=hand_side, betas=beta_init.astype(np.float32, copy=False))
         mano_optim_layer = MANOLayerNP(side=hand_side, betas=beta_optim)
 
-        verts_init, joints_init = mano_init_layer(
-            so3_init.astype(np.float32, copy=False),
-            trans_init.astype(np.float32, copy=False),
-        )
         verts_optim, joints_optim = mano_optim_layer(
             optim_shape_result.so3_optim.astype(np.float32, copy=False),
             optim_shape_result.trans_optim.astype(np.float32, copy=False),
         )
 
         faces_np: Int[ndarray, "n_faces=1538 3"] = mano_optim_layer.f.astype(np.int32)
-        normals_init: Float32[ndarray, "n_frames n_verts=778 3"] = compute_vertex_normals_batch(
-            verts_init[0:1], faces_np
+        normals_naive: Float32[ndarray, "n_frames n_verts=778 3"] = compute_vertex_normals_batch(
+            verts_naive[0:1], faces_np
+        )
+        normals_aligned: Float32[ndarray, "n_frames n_verts=778 3"] = compute_vertex_normals_batch(
+            verts_aligned_init[0:1], faces_np
         )
         normals_optim: Float32[ndarray, "n_frames n_verts=778 3"] = compute_vertex_normals_batch(
             verts_optim[0:1], faces_np
@@ -443,23 +585,76 @@ class HandCalibrator:
         mano_mesh_path: Path = calibration_root / f"{hand_side}_mano_mesh"
         mano_joint_path: Path = calibration_root / f"{hand_side}_mano_xyz"
 
-        verts_aligned_init: Float32[ndarray, "n_verts=778 3"] = verts_init[0]
-        joints_aligned_init: Float32[ndarray, "mp_kpts=21 3"] = joints_init[0]
+        verts_naive_frame: Float32[ndarray, "n_verts=778 3"] = verts_naive[0]
+        joints_naive_frame: Float32[ndarray, "mp_kpts=21 3"] = joints_naive[0]
+        verts_aligned_frame: Float32[ndarray, "n_verts=778 3"] = verts_aligned_init[0]
+        joints_aligned_frame: Float32[ndarray, "mp_kpts=21 3"] = joints_aligned_init[0]
         verts_aligned_optim: Float32[ndarray, "n_verts=778 3"] = verts_optim[0]
         joints_aligned_optim: Float32[ndarray, "mp_kpts=21 3"] = joints_optim[0]
+
+        class_id: int = 1 if hand_side == "right" else 0
+        class_ids: Int[ndarray, "mp_kpts=21"] = np.full((joints_aligned_optim.shape[0],), class_id, dtype=np.int32)
+        keypoint_ids: Int[ndarray, "mp_kpts=21"] = np.asarray(MEDIAPIPE_IDS, dtype=np.int32)
+
+        if self.config.verbose and np.all(np.isfinite(rotation_matrix_debug)):
+            rr.log(
+                f"{mano_joint_path}_rotated_debug",
+                rr.Points3D(
+                    rotated_joints_debug,
+                    class_ids=class_ids,
+                    keypoint_ids=keypoint_ids,
+                    show_labels=False,
+                ),
+            )
+
+        if self.config.verbose:
+            if np.any(valid_indices_debug):
+                naive_diff: Float32[ndarray, "n_valid"] = np.linalg.norm(
+                    joints_naive[0, valid_indices_debug] - hand_xyz_masked[valid_indices_debug], axis=1
+                ).astype(np.float32)
+                aligned_diff: Float32[ndarray, "n_valid"] = np.linalg.norm(
+                    joints_aligned_frame[valid_indices_debug] - hand_xyz_masked[valid_indices_debug], axis=1
+                ).astype(np.float32)
+                optim_diff: Float32[ndarray, "n_valid"] = np.linalg.norm(
+                    joints_aligned_optim[valid_indices_debug] - hand_xyz_masked[valid_indices_debug], axis=1
+                ).astype(np.float32)
+                print(
+                    "[mano-debug] mean joint errors (naive/aligned/optim):",
+                    float(np.nanmean(naive_diff)),
+                    float(np.nanmean(aligned_diff)),
+                    float(np.nanmean(optim_diff)),
+                )
+                if np.isfinite(rotated_joints_debug).all():
+                    diff_rotated: Float32[ndarray, "mp_kpts=21"] = np.linalg.norm(
+                        joints_aligned_frame - rotated_joints_debug, axis=1
+                    ).astype(np.float32)
+                    print(
+                        "[mano-debug] aligned vs rotated_debug -> mean/max:",
+                        float(np.nanmean(diff_rotated)),
+                        float(np.nanmax(diff_rotated)),
+                    )
 
         if self.config.verbose:
             rr.log(
                 f"{mano_mesh_path}_init",
                 rr.Mesh3D(
-                    vertex_positions=verts_aligned_init,
+                    vertex_positions=verts_naive_frame,
                     triangle_indices=faces_np,
-                    vertex_normals=normals_init[0],
-                    albedo_factor=(255, 0, 0, 255),
+                    vertex_normals=normals_naive[0],
+                    albedo_factor=(255, 64, 0, 255),
+                ),
+            )
+            rr.log(
+                f"{mano_mesh_path}_aligned",
+                rr.Mesh3D(
+                    vertex_positions=verts_aligned_frame,
+                    triangle_indices=faces_np,
+                    vertex_normals=normals_aligned[0],
+                    albedo_factor=(0, 255, 0, 255),
                 ),
             )
         rr.log(
-            f"{mano_mesh_path}_optim",
+                    f"{mano_mesh_path}_optim",
             rr.Mesh3D(
                 vertex_positions=verts_aligned_optim,
                 triangle_indices=faces_np,
@@ -467,9 +662,6 @@ class HandCalibrator:
                 albedo_factor=(0, 0, 255, 255),
             ),
         )
-        class_id: int = 1 if hand_side == "right" else 0
-        class_ids: Int[ndarray, "mp_kpts=21"] = np.full((joints_aligned_optim.shape[0],), class_id, dtype=np.int32)
-        keypoint_ids: Int[ndarray, "mp_kpts=21"] = np.asarray(MEDIAPIPE_IDS, dtype=np.int32)
         rr.log(
             f"{mano_joint_path}",
             rr.Points3D(
@@ -483,7 +675,25 @@ class HandCalibrator:
             rr.log(
                 f"{mano_joint_path}_init",
                 rr.Points3D(
-                    joints_aligned_init,
+                    joints_naive_frame,
+                    class_ids=class_ids,
+                    keypoint_ids=keypoint_ids,
+                    show_labels=False,
+                ),
+            )
+            rr.log(
+                f"{mano_joint_path}_aligned",
+                rr.Points3D(
+                    joints_aligned_frame,
+                    class_ids=class_ids,
+                    keypoint_ids=keypoint_ids,
+                    show_labels=False,
+                ),
+            )
+            rr.log(
+                f"{mano_joint_path}_triangulated_target",
+                rr.Points3D(
+                    np.where(np.isfinite(hand_xyz_masked), hand_xyz_masked, np.nan),
                     class_ids=class_ids,
                     keypoint_ids=keypoint_ids,
                     show_labels=False,
