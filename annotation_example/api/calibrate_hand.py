@@ -9,43 +9,32 @@ import open3d as o3d
 import rerun as rr
 import rerun.blueprint as rrb
 import torch
-from jaxopt._src.levenberg_marquardt import LevenbergMarquardtState
-from jaxtyping import Float, Float32, Int, UInt8
+from jaxtyping import Float, Int, UInt8
 from natsort import natsorted
 from numpy import ndarray
-from simplecv.apis.view_exoego import compute_vertex_normals_batch
 from simplecv.camera_parameters import PinholeParameters
 from simplecv.data.skeleton.coco_133 import (
     COCO_133_ID2NAME,
-    COCO_133_IDS,
     COCO_133_LINKS,
-    LEFT_HAND_IDX,
-    RIGHT_HAND_IDX,
 )
-from simplecv.data.skeleton.mediapipe import MEDIAPIPE_ID2NAME, MEDIAPIPE_IDS, MEDIAPIPE_LINKS
-from simplecv.ops.mano.mano_np import MANOLayerNP
-from simplecv.ops.mano.optim_jax_single_shape import (
-    OptimShapeInput,
-    OptimShapeResult,
-    PoseShapeOptimConfig,
-    SingleHandShapeOptim,
-)
-from simplecv.ops.triangulate import batch_triangulate
+from simplecv.data.skeleton.mediapipe import MEDIAPIPE_ID2NAME, MEDIAPIPE_LINKS
 from simplecv.rerun_log_utils import (
-    Points2DWithConfidence,
-    Points3DWithConfidence,
     RerunTyroConfig,
-    confidence_scores_to_rgb,
     log_pinhole,
     log_video,
 )
 from simplecv.video_io import MultiVideoReader
-from wilor_nano.hand_detection import DetectionResult, HandDetector, HandDetectorConfig
-from wilor_nano.hand_keypoints import HandKeypointDetectorConfig, KeypointResults, WilorHandKeypointDetector
+from wilor_nano.hand_detection import HandDetector, HandDetectorConfig
+from wilor_nano.hand_keypoints import HandKeypointDetectorConfig, WilorHandKeypointDetector
 
+from annotation_example.api.benchmark_hand_calib import (
+    HandCalibrationResult,
+    HandCalibrator,
+    HandCalibratorConfig,
+    mv_reader_to_rgb_ts_batch,
+)
 from annotation_example.api.calibrate_mv_videos import MultiViewCalibrator, MVCalibResults
 from annotation_example.rr_blueprints import create_view_container
-from annotation_example.api.benchmark_hand_calib import HandCalibrator, HandCalibratorConfig, HandCalibrationResult
 
 np.set_printoptions(suppress=True)
 
@@ -316,18 +305,23 @@ def main(config: HandCalibConfig) -> None:
     hand_calibrator = HandCalibrator(
         hand_detector=hand_detection_engine,
         hand_keypoint_detector=hand_keypoint_engine,
-        config=HandCalibratorConfig(mano_optim_iters=30, ts_nano=config.ts_nano),
+        config=HandCalibratorConfig(mano_optim_iters=30, ts_nano=config.ts_nano, hand_side=config.hand_side),
     )
 
     video_path_list: list[Path] = natsorted(config.videos_dir.glob("*.mp4"))
     mv_reader = MultiVideoReader(video_path_list)
 
+    rgb_ts_batch: UInt8[ndarray, "n_frames n_views H W 3"] = mv_reader_to_rgb_ts_batch(
+        mv_reader=mv_reader,
+        num_frames=1,
+        ts_nanos=config.ts_nano,
+        frame_timestamps_ns=exo_ts,
+    )
+
     hand_calib_result: HandCalibrationResult = hand_calibrator(
         exo_cam_list=pinhole_param_list,
-        exo_mv_reader=mv_reader,
-        shortest_timestamp=exo_ts,
+        rgb_ts_batch=rgb_ts_batch,
         parent_log_path=parent_log_path,
-        timeline=timeline,
     )
 
     print(f"Inference completed in {timer() - start:.2f} seconds")

@@ -216,7 +216,7 @@ class HandCalibrator:
         pinhole_param_list: list[PinholeParameters],
         parent_log_path: Path,
     ) -> ParsedDetections:
-        uvc_coco_list: list[Float[ndarray, "n_kpts=133 3"]] = []
+        uvc_coco_list: list[Float[ndarray, "coco_kpts=133 3"]] = []
         right_hand_kpts: KeypointResults | None = None
         left_hand_kpts: KeypointResults | None = None
 
@@ -227,7 +227,7 @@ class HandCalibrator:
             )
             camera_name: str = getattr(pinhole, "name", f"camera_{camera_idx}")
             hand_path_root: Path = parent_log_path / "exo" / camera_name / "pinhole"
-            uvc_coco: Float[ndarray, "n_kpts=133 3"] = np.full((133, 3), np.nan, dtype=np.float32)
+            uvc_coco: Float[ndarray, "coco_kpts=133 3"] = np.full((133, 3), np.nan, dtype=np.float32)
 
             for hand_label, xyxy in ("left", det_result.left_xyxy), ("right", det_result.right_xyxy):
                 if xyxy is None:
@@ -239,16 +239,16 @@ class HandCalibrator:
                     xyxy=xyxy,
                     handedness=hand_label,
                 )
-                uv: Float[ndarray, "n_frames=1 n_kpts=21 2"] = kpts_results.keypoints_2d
-                conf: Float[ndarray, "n_frames=1 n_kpts=21"] = kpts_results.scores
-                conf_values: Float[ndarray, "n_kpts=21"] = conf[0].astype(np.float32)
+                uv: Float[ndarray, "n_frames=1 mp_kpts=21 2"] = kpts_results.keypoints_2d
+                conf: Float[ndarray, "n_frames=1 mp_kpts=21"] = kpts_results.scores
+                conf_values: Float[ndarray, "mp_kpts=21"] = conf[0].astype(np.float32)
                 mean_conf: float = float(np.nanmean(conf_values))
-                uv_filtered: Float[ndarray, "n_kpts=21 2"] = uv[0].copy()
+                uv_filtered: Float[ndarray, "mp_kpts=21 2"] = uv[0].copy()
                 if mean_conf < 0.4:
                     uv_filtered[:] = np.nan
                     conf_values[:] = 0.0
 
-                conf_colors: UInt8[ndarray, "n_frames=1 n_kpts=21 3"] = confidence_scores_to_rgb(
+                conf_colors: UInt8[ndarray, "n_frames=1 mp_kpts=21 3"] = confidence_scores_to_rgb(
                     confidence_scores=conf_values[np.newaxis, :, np.newaxis]
                 )
 
@@ -260,30 +260,31 @@ class HandCalibrator:
                 if hand_label == "left" and left_hand_kpts is None:
                     left_hand_kpts = kpts_results
 
-                rr.log(
-                    f"{hand_log_path}/bbox",
-                    rr.Boxes2D(
-                        array=xyxy,
-                        array_format=rr.Box2DFormat.XYXY,
-                        class_ids=0 if hand_label == "left" else 1,
-                        show_labels=True,
-                    ),
-                )
-                rr.log(
-                    f"{hand_log_path}/keypoints",
-                    Points2DWithConfidence(
-                        positions=uv_filtered,
-                        confidences=conf_values,
-                        class_ids=0 if hand_label == "left" else 1,
-                        keypoint_ids=MEDIAPIPE_IDS,
-                        show_labels=False,
-                        colors=conf_colors[0],
-                    ),
-                )
+                if self.config.verbose:
+                    rr.log(
+                        f"{hand_log_path}/bbox",
+                        rr.Boxes2D(
+                            array=xyxy,
+                            array_format=rr.Box2DFormat.XYXY,
+                            class_ids=0 if hand_label == "left" else 1,
+                            show_labels=True,
+                        ),
+                    )
+                    rr.log(
+                        f"{hand_log_path}/keypoints",
+                        Points2DWithConfidence(
+                            positions=uv_filtered,
+                            confidences=conf_values,
+                            class_ids=0 if hand_label == "left" else 1,
+                            keypoint_ids=MEDIAPIPE_IDS,
+                            show_labels=False,
+                            colors=conf_colors[0],
+                        ),
+                    )
 
             uvc_coco_list.append(uvc_coco)
 
-        uvc_coco_batch: Float[ndarray, "n_views n_kpts=133 3"] = np.stack(uvc_coco_list)
+        uvc_coco_batch: Float[ndarray, "n_views coco_kpts=133 3"] = np.stack(uvc_coco_list)
         return ParsedDetections(
             uvc_coco_batch=uvc_coco_batch,
             right_hand_kpts=right_hand_kpts,
@@ -292,31 +293,31 @@ class HandCalibrator:
 
     def _triangulate_keypoints(
         self,
-        uvc_coco_batch: Float[ndarray, "n_views n_kpts=133 3"],
+        uvc_coco_batch: Float[ndarray, "n_views coco_kpts=133 3"],
         pinhole_param_list: list[PinholeParameters],
         *,
         calibration_root: Path,
-    ) -> tuple[Float[ndarray, "n_kpts=133 3"], Float[ndarray, "n_kpts=133"]]:
-        uvc_triangulate_batch: Float[ndarray, "n_views n_kpts=133 3"] = np.nan_to_num(
+    ) -> tuple[Float[ndarray, "coco_kpts=133 3"], Float[ndarray, "coco_kpts=133"]]:
+        uvc_triangulate_batch: Float[ndarray, "n_views coco_kpts=133 3"] = np.nan_to_num(
             uvc_coco_batch.copy(),
             nan=0.0,
         )
         Pall_exo: Float[ndarray, "n_views 3 4"] = np.stack(
             [pinhole.projection_matrix for pinhole in pinhole_param_list]
         ).astype(np.float32)
-        xyzc: Float[ndarray, "n_kpts=133 4"] = batch_triangulate(
+        xyzc: Float[ndarray, "coco_kpts=133 4"] = batch_triangulate(
             uvc_triangulate_batch,
             Pall_exo,
             min_views=2,
         )
-        xyz: Float[ndarray, "n_kpts=133 3"] = xyzc[:, :3]
-        conf_values: Float[ndarray, "n_kpts=133"] = xyzc[:, 3]
-        xyz_for_logging: Float[ndarray, "n_kpts=133 3"] = np.where(
+        xyz: Float[ndarray, "coco_kpts=133 3"] = xyzc[:, :3]
+        conf_values: Float[ndarray, "coco_kpts=133"] = xyzc[:, 3]
+        xyz_for_logging: Float[ndarray, "coco_kpts=133 3"] = np.where(
             conf_values[:, np.newaxis] > 0,
             xyz,
             np.nan,
         )
-        conf_colors: UInt8[ndarray, "1 n_kpts=133 3"] = confidence_scores_to_rgb(
+        conf_colors: UInt8[ndarray, "1 coco_kpts=133 3"] = confidence_scores_to_rgb(
             conf_values[:, np.newaxis][np.newaxis, ...]
         )
 
@@ -336,18 +337,17 @@ class HandCalibrator:
     def _optimize_mano(
         self,
         *,
-        xyz: Float[ndarray, "n_kpts=133 3"],
-        confidences: Float[ndarray, "n_kpts=133"],
+        xyz: Float[ndarray, "coco_kpts=133 3"],
+        confidences: Float[ndarray, "coco_kpts=133"],
         parsed_detections: ParsedDetections,
         pinhole_param_list: list[PinholeParameters],
         calibration_root: Path,
     ) -> tuple[
         Float32[ndarray, "n_verts=778 3"],
-        Float32[ndarray, "n_joints=21 3"],
+        Float32[ndarray, "mp_kpts=21 3"],
         Int[ndarray, "n_faces=1538 3"],
     ]:
         hand_side: Literal["left", "right"] = self.config.hand_side
-        n_frames_optim: int = 1
         uv_exo_stack: Float[ndarray, "n_frames=1 n_views n_kpts=133 2"] = parsed_detections.uvc_coco_batch[
             np.newaxis, :, :, 0:2
         ]
@@ -363,17 +363,17 @@ class HandCalibrator:
             raise ValueError(f"No keypoint detections available for hand '{hand_side}'")
 
         if kpts_results_selected.global_orient is None or kpts_results_selected.hand_pose is None:
-            so3_init: Float[ndarray, "b 48"] = np.zeros((n_frames_optim, 48), dtype=np.float32)
+            so3_init: Float[ndarray, "b 48"] = np.zeros((self.config.n_frame_optim, 48), dtype=np.float32)
         else:
             global_orient: Float[ndarray, "b 1 3"] = kpts_results_selected.global_orient.astype(np.float32)
             hand_pose: Float[ndarray, "b 15 3"] = kpts_results_selected.hand_pose.astype(np.float32)
             so3_concat: Float[ndarray, "b 16 3"] = np.concatenate([global_orient, hand_pose], axis=1)
             so3_init = so3_concat.reshape(so3_concat.shape[0], -1)
-            if so3_init.shape[0] != n_frames_optim:
+            if so3_init.shape[0] != self.config.n_frame_optim:
                 if so3_init.shape[0] == 0:
-                    so3_init = np.zeros((n_frames_optim, 48), dtype=np.float32)
+                    so3_init = np.zeros((self.config.n_frame_optim, 48), dtype=np.float32)
                 else:
-                    so3_init = np.broadcast_to(so3_init[0:1], (n_frames_optim, so3_init.shape[1])).astype(
+                    so3_init = np.broadcast_to(so3_init[0:1], (self.config.n_frame_optim, so3_init.shape[1])).astype(
                         np.float32,
                         copy=True,
                     )
@@ -384,20 +384,18 @@ class HandCalibrator:
         hand_xyz: Float[ndarray, "n_hand 3"] = xyz[hand_indices]
         hand_conf: Float[ndarray, "n_hand"] = confidences[hand_indices]
         valid_hand_mask: np.ndarray = hand_conf > 0.0
-        valid_indices: Int[ndarray, "n_valid"] = np.where(valid_hand_mask)[0]
         if np.any(valid_hand_mask):
             trans_guess: Float[ndarray, "3"] = hand_xyz[valid_hand_mask].mean(axis=0).astype(np.float32)
         else:
             trans_guess = np.zeros((3,), dtype=np.float32)
-        valid_indices: Int[ndarray, "n_valid"] = np.where(valid_hand_mask)[0]
-        trans_init: Float[ndarray, "b 3"] = np.broadcast_to(trans_guess, (n_frames_optim, 3)).astype(
+        trans_init: Float[ndarray, "b 3"] = np.broadcast_to(trans_guess, (self.config.n_frame_optim, 3)).astype(
             np.float32, copy=True
         )
 
         optim_shape_cfg = PoseShapeOptimConfig(
             Pall=Pall_exo,
             hand_side=hand_side,
-            n_frames_optim=n_frames_optim,
+            n_frames_optim=self.config.n_frame_optim,
             n_optim_iters=self.config.mano_optim_iters,
         )
         optimizer_shape = SingleHandShapeOptim(config=optim_shape_cfg)
@@ -407,12 +405,12 @@ class HandCalibrator:
             if betas_array.ndim == 1:
                 beta_init: Float[ndarray, "10"] = betas_array
             else:
-                beta_init = betas_array[0]
+                beta_init: Float[ndarray, "10"] = betas_array[0]
         else:
             beta_init = np.zeros((10,), dtype=np.float32)
 
         optim_shape_input: OptimShapeInput = OptimShapeInput(
-            uv_pred=uv_exo_stack[:n_frames_optim],
+            uv_pred=uv_exo_stack,
             beta_init=beta_init,
             so3_init=so3_init,
             trans_init=trans_init,
@@ -445,11 +443,10 @@ class HandCalibrator:
         mano_mesh_path: Path = calibration_root / f"{hand_side}_mano_mesh"
         mano_joint_path: Path = calibration_root / f"{hand_side}_mano_xyz"
 
-        triangulated_hand: Float[ndarray, "n_joints=21 3"] = xyz[hand_indices]
         verts_aligned_init: Float32[ndarray, "n_verts=778 3"] = verts_init[0]
-        joints_aligned_init: Float32[ndarray, "n_joints=21 3"] = joints_init[0]
+        joints_aligned_init: Float32[ndarray, "mp_kpts=21 3"] = joints_init[0]
         verts_aligned_optim: Float32[ndarray, "n_verts=778 3"] = verts_optim[0]
-        joints_aligned_optim: Float32[ndarray, "n_joints=21 3"] = joints_optim[0]
+        joints_aligned_optim: Float32[ndarray, "mp_kpts=21 3"] = joints_optim[0]
 
         if self.config.verbose:
             rr.log(
@@ -471,8 +468,8 @@ class HandCalibrator:
             ),
         )
         class_id: int = 1 if hand_side == "right" else 0
-        class_ids: Int[ndarray, "n_joints=21"] = np.full((joints_aligned_optim.shape[0],), class_id, dtype=np.int32)
-        keypoint_ids: Int[ndarray, "n_joints=21"] = np.asarray(MEDIAPIPE_IDS, dtype=np.int32)
+        class_ids: Int[ndarray, "mp_kpts=21"] = np.full((joints_aligned_optim.shape[0],), class_id, dtype=np.int32)
+        keypoint_ids: Int[ndarray, "mp_kpts=21"] = np.asarray(MEDIAPIPE_IDS, dtype=np.int32)
         rr.log(
             f"{mano_joint_path}",
             rr.Points3D(
@@ -482,6 +479,16 @@ class HandCalibrator:
                 show_labels=False,
             ),
         )
+        if self.config.verbose:
+            rr.log(
+                f"{mano_joint_path}_init",
+                rr.Points3D(
+                    joints_aligned_init,
+                    class_ids=class_ids,
+                    keypoint_ids=keypoint_ids,
+                    show_labels=False,
+                ),
+            )
 
         return verts_aligned_optim, joints_aligned_optim, faces_np
 
