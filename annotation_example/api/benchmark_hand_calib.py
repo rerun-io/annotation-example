@@ -20,6 +20,7 @@ from simplecv.apis.view_exoego import (
 )
 from simplecv.camera_parameters import PinholeParameters
 from simplecv.configs.exoego_dataset_configs import AnnotatedExoEgoDatasetUnion
+from simplecv.data.exo.base_exo import BaseExoSequence
 from simplecv.data.exoego.base_exoego import BaseExoEgoSequence
 from simplecv.data.skeleton.coco_133 import (
     COCO_133_ID2NAME,
@@ -116,6 +117,8 @@ class HandCalibratorConfig:
     """Optional absolute timestamp in nanoseconds to sample; defaults to first frame when ``None``."""
     mano_optim_iters: int = 30
     """Number of Levenberg-Marquardt iterations for MANO pose/shape fitting."""
+    n_frame_optim: int = 1
+    """Number of consecutive frames to jointly optimize."""
     verbose: bool = True
     """Whether to log additional intermediate results for debugging purposes."""
 
@@ -124,10 +127,6 @@ class HandCalibratorConfig:
 class HandCalibrationResult:
     """Outputs from a single calibration pass for downstream consumers."""
 
-    frame_index: int
-    """Index into the exo video readers corresponding to the calibrated frame."""
-    timestamp_ns: int
-    """Absolute nanosecond timestamp for the calibrated frame."""
     pinhole_param_list: list[PinholeParameters]
     """Per-camera pinhole parameters aligned with the exo rig ordering."""
     xyz: Float[ndarray, "n_kpts=133 3"]
@@ -165,34 +164,17 @@ class HandCalibrator:
         self,
         *,
         exo_cam_list: list[PinholeParameters],
-        exo_mv_reader: MultiVideoReader,
-        shortest_timestamp: Int[ndarray, "n_frames"],
+        rgb_ts_batch: UInt8[ndarray, "n_frames n_views H W 3"],
         parent_log_path: Path,
-        timeline: str,
     ) -> HandCalibrationResult:
         calibration_root: Path = parent_log_path / "hand_calibration"
-        target_ts_nano: int = (
-            self.config.ts_nano if self.config.ts_nano is not None else frame_index_to_timestamp(shortest_timestamp, 0)
-        )
-        frame_index: int = timestamp_to_frame_index(target_ts_nano, shortest_timestamp)
-        frame_timestamp_ns: int = frame_index_to_timestamp(shortest_timestamp, frame_index)
-        frame_timestamp_seconds: float = frame_timestamp_ns * 1e-9
-        rr.set_time(timeline=timeline, duration=frame_timestamp_seconds)
 
-        bgr_list: list[UInt8[ndarray, "H W 3"]] = exo_mv_reader[frame_index]
-        rgb_list: list[UInt8[ndarray, "H W 3"]] = [cv2.cvtColor(bgr_frame, cv2.COLOR_BGR2RGB) for bgr_frame in bgr_list]
-        if len(rgb_list) != len(exo_cam_list):
-            msg = f"Mismatch between RGB frames and exo cameras: {len(rgb_list)} frames vs {len(exo_cam_list)} cameras"
-            raise ValueError(msg)
-
-        pinhole_param_list: list[PinholeParameters] = exo_cam_list
+        rgb_list: UInt8[ndarray, "n_views H W 3"] = rgb_ts_batch[0]
 
         parsed_detections: ParsedDetections = self._detect_keypoints(
             rgb_list=rgb_list,
-            pinhole_param_list=pinhole_param_list,
+            pinhole_param_list=exo_cam_list,
             parent_log_path=parent_log_path,
-            timeline=timeline,
-            timestamp_seconds=frame_timestamp_seconds,
         )
 
         triangulation_result: tuple[
@@ -200,7 +182,7 @@ class HandCalibrator:
             Float[ndarray, "n_kpts=133"],
         ] = self._triangulate_keypoints(
             parsed_detections.uvc_coco_batch,
-            pinhole_param_list,
+            exo_cam_list,
             calibration_root=calibration_root,
         )
         xyz: Float[ndarray, "n_kpts=133 3"]
@@ -214,16 +196,12 @@ class HandCalibrator:
             xyz=xyz,
             confidences=conf_values,
             parsed_detections=parsed_detections,
-            pinhole_param_list=pinhole_param_list,
+            pinhole_param_list=exo_cam_list,
             calibration_root=calibration_root,
-            timeline=timeline,
-            timestamp_seconds=frame_timestamp_seconds,
         )
 
         return HandCalibrationResult(
-            frame_index=frame_index,
-            timestamp_ns=frame_timestamp_ns,
-            pinhole_param_list=pinhole_param_list,
+            pinhole_param_list=exo_cam_list,
             xyz=xyz,
             confidences=conf_values,
             # mano_vertices=mano_vertices,
@@ -234,19 +212,15 @@ class HandCalibrator:
     def _detect_keypoints(
         self,
         *,
-        rgb_list: list[UInt8[ndarray, "H W 3"]],
+        rgb_list: UInt8[ndarray, "n_views H W 3"],
         pinhole_param_list: list[PinholeParameters],
         parent_log_path: Path,
-        timeline: str,
-        timestamp_seconds: float,
     ) -> ParsedDetections:
         uvc_coco_list: list[Float[ndarray, "n_kpts=133 3"]] = []
         right_hand_kpts: KeypointResults | None = None
         left_hand_kpts: KeypointResults | None = None
 
         for camera_idx, (rgb_hw3, pinhole) in enumerate(zip(rgb_list, pinhole_param_list, strict=True)):
-            rr.set_time(timeline=timeline, duration=timestamp_seconds)
-
             det_result: DetectionResult = self.hand_detector(
                 rgb_hw3=rgb_hw3,
                 hand_conf=self.config.detection_confidence,
@@ -367,15 +341,11 @@ class HandCalibrator:
         parsed_detections: ParsedDetections,
         pinhole_param_list: list[PinholeParameters],
         calibration_root: Path,
-        timeline: str,
-        timestamp_seconds: float,
     ) -> tuple[
         Float32[ndarray, "n_verts=778 3"],
         Float32[ndarray, "n_joints=21 3"],
         Int[ndarray, "n_faces=1538 3"],
     ]:
-        rr.set_time(timeline=timeline, duration=timestamp_seconds)
-
         hand_side: Literal["left", "right"] = self.config.hand_side
         n_frames_optim: int = 1
         uv_exo_stack: Float[ndarray, "n_frames=1 n_views n_kpts=133 2"] = parsed_detections.uvc_coco_batch[
@@ -600,34 +570,46 @@ def main(config: BenchmarkHandCalibConfig) -> None:
     )
     rr.send_blueprint(blueprint)
 
-    # if config.log_labels:
-    #     log_exoego_batch(
-    #         exoego_sequence=exoego_sequence,
-    #         timeline=timeline,
-    #         shortest_timestamp=shortest_timestamp,
-    #         parent_log_path=parent_log_path,
-    #     )
+    if config.log_labels:
+        log_exoego_batch(
+            exoego_sequence=exoego_sequence,
+            timeline=timeline,
+            shortest_timestamp=shortest_timestamp,
+            parent_log_path=parent_log_path,
+        )
 
     hand_detection_engine = HandDetector(HandDetectorConfig(verbose=False))
     hand_keypoint_engine = WilorHandKeypointDetector(HandKeypointDetectorConfig(verbose=False))
 
-    exo_sequence = exoego_sequence.exo_sequence
+    exo_sequence: BaseExoSequence | None = exoego_sequence.exo_sequence
     if exo_sequence is None:
         raise ValueError("Selected dataset does not expose an exocentric camera rig.")
 
+    target_ts_nano: int = (
+        config.hand_calibrator.ts_nano
+        if config.hand_calibrator.ts_nano is not None
+        else frame_index_to_timestamp(shortest_timestamp, 0)
+    )
+    frame_index: int = timestamp_to_frame_index(target_ts_nano, shortest_timestamp)
+    frame_timestamp_ns: int = frame_index_to_timestamp(shortest_timestamp, frame_index)
+    frame_timestamp_seconds: float = frame_timestamp_ns * 1e-9
+    rr.set_time(timeline=timeline, duration=frame_timestamp_seconds)
+
+    rgb_ts_batch: UInt8[ndarray, "n_frames n_views H W 3"] = mv_reader_to_rgb_ts_batch(
+        mv_reader=exo_sequence.exo_video_readers,
+        num_frames=config.hand_calibrator.n_frame_optim,
+        ts_nanos=target_ts_nano,
+        frame_timestamps_ns=shortest_timestamp,
+    )
     hand_calibrator = HandCalibrator(
         hand_detector=hand_detection_engine,
         hand_keypoint_detector=hand_keypoint_engine,
         config=config.hand_calibrator,
     )
-
     calibration_result: HandCalibrationResult = hand_calibrator(
         exo_cam_list=exo_sequence.exo_cam_list,
-        exo_mv_reader=exo_sequence.exo_video_readers,
-        shortest_timestamp=shortest_timestamp,
+        rgb_ts_batch=rgb_ts_batch,
         parent_log_path=parent_log_path,
-        timeline=timeline,
     )
 
-    print(f"Calibrated frame {calibration_result.frame_index} @ {calibration_result.timestamp_ns} ns")
     print(f"Total time taken: {timer() - start_time:.2f} seconds")
