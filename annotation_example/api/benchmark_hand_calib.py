@@ -110,7 +110,7 @@ class HandCalibratorConfig:
 
     hand_side: Literal["left", "right"] = "right"
     """Which hand to optimize with MANO—either "left" or "right"."""
-    detection_confidence: float = 0.3
+    detection_confidence: float = 0.5
     """Minimum detector confidence required to keep a hand bounding box."""
     ts_nano: int | None = None
     """Optional absolute timestamp in nanoseconds to sample; defaults to first frame when ``None``."""
@@ -169,6 +169,7 @@ class HandCalibrator:
         timeline: str,
     ) -> HandCalibrationResult:
         calibration_root: Path = parent_log_path / "hand_calibration"
+
         target_ts_nano: int = (
             self.config.ts_nano if self.config.ts_nano is not None else frame_index_to_timestamp(shortest_timestamp, 0)
         )
@@ -183,11 +184,9 @@ class HandCalibrator:
             msg = f"Mismatch between RGB frames and exo cameras: {len(rgb_list)} frames vs {len(exo_cam_list)} cameras"
             raise ValueError(msg)
 
-        pinhole_param_list: list[PinholeParameters] = exo_cam_list
-
         parsed_detections: ParsedDetections = self._detect_keypoints(
             rgb_list=rgb_list,
-            pinhole_param_list=pinhole_param_list,
+            pinhole_param_list=exo_cam_list,
             parent_log_path=parent_log_path,
             timeline=timeline,
             timestamp_seconds=frame_timestamp_seconds,
@@ -198,7 +197,7 @@ class HandCalibrator:
             Float[ndarray, "n_kpts=133"],
         ] = self._triangulate_keypoints(
             parsed_detections.uvc_coco_batch,
-            pinhole_param_list,
+            exo_cam_list,
             calibration_root=calibration_root,
         )
         xyz: Float[ndarray, "n_kpts=133 3"]
@@ -212,7 +211,7 @@ class HandCalibrator:
             xyz=xyz,
             confidences=conf_values,
             parsed_detections=parsed_detections,
-            pinhole_param_list=pinhole_param_list,
+            pinhole_param_list=exo_cam_list,
             calibration_root=calibration_root,
             timeline=timeline,
             timestamp_seconds=frame_timestamp_seconds,
@@ -221,7 +220,7 @@ class HandCalibrator:
         return HandCalibrationResult(
             frame_index=frame_index,
             timestamp_ns=frame_timestamp_ns,
-            pinhole_param_list=pinhole_param_list,
+            pinhole_param_list=exo_cam_list,
             xyz=xyz,
             confidences=conf_values,
             # mano_vertices=mano_vertices,
@@ -422,73 +421,94 @@ class HandCalibrator:
             np.float32, copy=True
         )
 
-        # optim_shape_cfg = PoseShapeOptimConfig(
-        #     Pall=Pall_exo,
-        #     hand_side=hand_side,
-        #     n_frames_optim=n_frames_optim,
-        #     n_optim_iters=self.config.mano_optim_iters,
-        # )
-        # optimizer_shape = SingleHandShapeOptim(config=optim_shape_cfg)
+        optim_shape_cfg = PoseShapeOptimConfig(
+            Pall=Pall_exo,
+            hand_side=hand_side,
+            n_frames_optim=n_frames_optim,
+            n_optim_iters=self.config.mano_optim_iters,
+        )
+        optimizer_shape = SingleHandShapeOptim(config=optim_shape_cfg)
 
-        # if kpts_results_selected.betas is not None and kpts_results_selected.betas.size > 0:
-        #     betas_array = np.asarray(kpts_results_selected.betas, dtype=np.float32)
-        #     if betas_array.ndim == 1:
-        #         beta_init: Float[ndarray, "10"] = betas_array
-        #     else:
-        #         beta_init = betas_array[0]
-        # else:
-        #     beta_init = np.zeros((10,), dtype=np.float32)
+        if kpts_results_selected.betas is not None and kpts_results_selected.betas.size > 0:
+            betas_array = np.asarray(kpts_results_selected.betas, dtype=np.float32)
+            if betas_array.ndim == 1:
+                beta_init: Float[ndarray, "10"] = betas_array
+            else:
+                beta_init = betas_array[0]
+        else:
+            beta_init = np.zeros((10,), dtype=np.float32)
 
-        # optim_shape_input: OptimShapeInput = OptimShapeInput(
-        #     uv_pred=uv_exo_stack[:n_frames_optim],
-        #     beta_init=beta_init,
-        #     so3_init=so3_init,
-        #     trans_init=trans_init,
-        # )
-        # optim_shape_tuple: tuple[OptimShapeResult, LevenbergMarquardtState] = optimizer_shape(optim_shape_input)
-        # optim_shape_result: OptimShapeResult = optim_shape_tuple[0]
+        optim_shape_input: OptimShapeInput = OptimShapeInput(
+            uv_pred=uv_exo_stack[:n_frames_optim],
+            beta_init=beta_init,
+            so3_init=so3_init,
+            trans_init=trans_init,
+        )
+        optim_shape_tuple: tuple[OptimShapeResult, LevenbergMarquardtState] = optimizer_shape(optim_shape_input)
+        optim_shape_result: OptimShapeResult = optim_shape_tuple[0]
 
-        # beta_optim: Float[ndarray, "10"] = optim_shape_result.beta_optim
-        mano_layer = MANOLayerNP(side=hand_side, betas=np.zeros((10,), dtype=np.float32))
-        mano_outputs: tuple[
+        beta_optim: Float[ndarray, "10"] = optim_shape_result.beta_optim
+        mano_optim_layer = MANOLayerNP(side=hand_side, betas=beta_optim)
+        mano_optim: tuple[
             Float32[ndarray, "n_frames n_verts=778 3"],
             Float32[ndarray, "n_frames n_joints=21 3"],
-        ] = mano_layer(np.zeros((1, 48)), trans_init)
-        verts: Float32[ndarray, "n_frames n_verts=778 3"] = mano_outputs[0]
-        joints: Float32[ndarray, "n_frames n_joints=21 3"] = mano_outputs[1]
-        faces_np: Int[ndarray, "n_faces=1538 3"] = mano_layer.f.astype(np.int32)
-        vertex_normals: Float32[ndarray, "n_frames n_verts=778 3"] = compute_vertex_normals_batch(verts[0:1], faces_np)
+        ] = mano_optim_layer(optim_shape_result.so3_optim, optim_shape_result.trans_optim)
+
+        mano_init_layer = MANOLayerNP(side=hand_side, betas=beta_init)
+        mano_init: tuple[
+            Float32[ndarray, "n_frames n_verts=778 3"],
+            Float32[ndarray, "n_frames n_joints=21 3"],
+        ] = mano_init_layer(so3_init, trans_init)
+
+        verts_init: Float32[ndarray, "n_frames n_verts=778 3"] = mano_init[0]
+        joints_init: Float32[ndarray, "n_frames n_joints=21 3"] = mano_init[1]
+        faces_np: Int[ndarray, "n_faces=1538 3"] = mano_init_layer.f.astype(np.int32)
+        normals_init: Float32[ndarray, "n_frames n_verts=778 3"] = compute_vertex_normals_batch(
+            verts_init[0:1], faces_np
+        )
 
         mano_mesh_path: Path = calibration_root / f"{hand_side}_mano_mesh"
         mano_joint_path: Path = calibration_root / f"{hand_side}_mano_xyz"
 
-        triangulated_hand: Float[ndarray, "n_joints=21 3"] = xyz[hand_indices]
-        verts_aligned: Float32[ndarray, "n_verts=778 3"] = verts[0]
-        joints_aligned: Float32[ndarray, "n_joints=21 3"] = joints[0]
-
         rr.log(
-            f"{mano_mesh_path}",
+            f"{mano_mesh_path}_init",
             rr.Mesh3D(
-                vertex_positions=verts_aligned,
+                vertex_positions=verts_init,
                 triangle_indices=faces_np,
-                vertex_normals=vertex_normals[0],
+                vertex_normals=normals_init[0],
                 albedo_factor=(0, 0, 255, 255),
             ),
         )
-        class_id: int = 1 if hand_side == "right" else 0
-        class_ids: Int[ndarray, "n_joints=21"] = np.full((joints.shape[1],), class_id, dtype=np.int32)
-        keypoint_ids: Int[ndarray, "n_joints=21"] = np.asarray(MEDIAPIPE_IDS, dtype=np.int32)
+
+        verts_optim: Float32[ndarray, "n_frames n_verts=778 3"] = mano_optim[0]
+        joints_optim: Float32[ndarray, "n_frames n_joints=21 3"] = mano_optim[1]
+        normals_optim: Float32[ndarray, "n_frames n_verts=778 3"] = compute_vertex_normals_batch(
+            verts_optim[0:1], faces_np
+        )
         rr.log(
-            f"{mano_joint_path}",
-            rr.Points3D(
-                joints_aligned,
-                class_ids=class_ids,
-                keypoint_ids=keypoint_ids,
-                show_labels=False,
+            f"{mano_mesh_path}_optim",
+            rr.Mesh3D(
+                vertex_positions=verts_optim,
+                triangle_indices=faces_np,
+                vertex_normals=normals_optim[0],
+                albedo_factor=(255, 0, 0, 255),
             ),
         )
 
-        return verts_aligned, joints_aligned, faces_np
+        # class_id: int = 1 if hand_side == "right" else 0
+        # class_ids: Int[ndarray, "n_joints=21"] = np.full((joints.shape[1],), class_id, dtype=np.int32)
+        # keypoint_ids: Int[ndarray, "n_joints=21"] = np.asarray(MEDIAPIPE_IDS, dtype=np.int32)
+        # rr.log(
+        #     f"{mano_joint_path}",
+        #     rr.Points3D(
+        #         joints_aligned,
+        #         class_ids=class_ids,
+        #         keypoint_ids=keypoint_ids,
+        #         show_labels=False,
+        #     ),
+        # )
+
+        return verts_optim, joints_optim, faces_np
 
 
 @dataclass
