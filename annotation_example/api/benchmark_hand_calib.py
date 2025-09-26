@@ -32,6 +32,7 @@ from simplecv.data.skeleton.coco_133 import (
 from simplecv.data.skeleton.mediapipe import MEDIAPIPE_ID2NAME, MEDIAPIPE_IDS, MEDIAPIPE_LINKS
 from simplecv.ops.mano.mano_np import MANOLayerNP
 from simplecv.ops.mano.optim_jax_single_shape import (
+    LossWeights,
     OptimShapeInput,
     OptimShapeResult,
     PoseShapeOptimConfig,
@@ -111,11 +112,11 @@ class HandCalibratorConfig:
 
     hand_side: Literal["left", "right"] = "right"
     """Which hand to optimize with MANO—either "left" or "right"."""
-    detection_confidence: float = 0.3
+    detection_confidence: float = 0.5
     """Minimum detector confidence required to keep a hand bounding box."""
     ts_nano: int | None = None
     """Optional absolute timestamp in nanoseconds to sample; defaults to first frame when ``None``."""
-    mano_optim_iters: int = 30
+    mano_optim_iters: int = 60
     """Number of Levenberg-Marquardt iterations for MANO pose/shape fitting."""
     n_frame_optim: int = 1
     """Number of consecutive frames to jointly optimize."""
@@ -536,7 +537,9 @@ class HandCalibrator:
         verts_aligned_pre, joints_aligned_pre = mano_init_layer(so3_init_aligned, trans_init_f32)
 
         root_delta: Float32[ndarray, "3"] = (joints_naive[0, 0] - joints_aligned_pre[0, 0]).astype(np.float32)
-        trans_init_aligned: Float32[ndarray, "b 3"] = trans_init_f32 + root_delta[np.newaxis, :] + translation_offset[np.newaxis, :]
+        trans_init_aligned: Float32[ndarray, "b 3"] = (
+            trans_init_f32 + root_delta[np.newaxis, :] + translation_offset[np.newaxis, :]
+        )
 
         verts_aligned_init: Float32[ndarray, "n_frames n_verts=778 3"]
         joints_aligned_init: Float32[ndarray, "n_frames mp_kpts=21 3"]
@@ -548,6 +551,12 @@ class HandCalibrator:
         optim_shape_cfg = PoseShapeOptimConfig(
             Pall=Pall_exo,
             hand_side=hand_side,
+            loss_weights=LossWeights(
+                keypoint_2d=1.0,
+                depth=0.0,
+                temp=0.0,
+                pose_reg=1.0,
+            ),
             n_frames_optim=self.config.n_frame_optim,
             n_optim_iters=self.config.mano_optim_iters,
         )
@@ -596,44 +605,6 @@ class HandCalibrator:
         class_ids: Int[ndarray, "mp_kpts=21"] = np.full((joints_aligned_optim.shape[0],), class_id, dtype=np.int32)
         keypoint_ids: Int[ndarray, "mp_kpts=21"] = np.asarray(MEDIAPIPE_IDS, dtype=np.int32)
 
-        if self.config.verbose and np.all(np.isfinite(rotation_matrix_debug)):
-            rr.log(
-                f"{mano_joint_path}_rotated_debug",
-                rr.Points3D(
-                    rotated_joints_debug,
-                    class_ids=class_ids,
-                    keypoint_ids=keypoint_ids,
-                    show_labels=False,
-                ),
-            )
-
-        if self.config.verbose:
-            if np.any(valid_indices_debug):
-                naive_diff: Float32[ndarray, "n_valid"] = np.linalg.norm(
-                    joints_naive[0, valid_indices_debug] - hand_xyz_masked[valid_indices_debug], axis=1
-                ).astype(np.float32)
-                aligned_diff: Float32[ndarray, "n_valid"] = np.linalg.norm(
-                    joints_aligned_frame[valid_indices_debug] - hand_xyz_masked[valid_indices_debug], axis=1
-                ).astype(np.float32)
-                optim_diff: Float32[ndarray, "n_valid"] = np.linalg.norm(
-                    joints_aligned_optim[valid_indices_debug] - hand_xyz_masked[valid_indices_debug], axis=1
-                ).astype(np.float32)
-                print(
-                    "[mano-debug] mean joint errors (naive/aligned/optim):",
-                    float(np.nanmean(naive_diff)),
-                    float(np.nanmean(aligned_diff)),
-                    float(np.nanmean(optim_diff)),
-                )
-                if np.isfinite(rotated_joints_debug).all():
-                    diff_rotated: Float32[ndarray, "mp_kpts=21"] = np.linalg.norm(
-                        joints_aligned_frame - rotated_joints_debug, axis=1
-                    ).astype(np.float32)
-                    print(
-                        "[mano-debug] aligned vs rotated_debug -> mean/max:",
-                        float(np.nanmean(diff_rotated)),
-                        float(np.nanmax(diff_rotated)),
-                    )
-
         if self.config.verbose:
             rr.log(
                 f"{mano_mesh_path}_init",
@@ -654,7 +625,7 @@ class HandCalibrator:
                 ),
             )
         rr.log(
-                    f"{mano_mesh_path}_optim",
+            f"{mano_mesh_path}_optim",
             rr.Mesh3D(
                 vertex_positions=verts_aligned_optim,
                 triangle_indices=faces_np,
@@ -685,15 +656,6 @@ class HandCalibrator:
                 f"{mano_joint_path}_aligned",
                 rr.Points3D(
                     joints_aligned_frame,
-                    class_ids=class_ids,
-                    keypoint_ids=keypoint_ids,
-                    show_labels=False,
-                ),
-            )
-            rr.log(
-                f"{mano_joint_path}_triangulated_target",
-                rr.Points3D(
-                    np.where(np.isfinite(hand_xyz_masked), hand_xyz_masked, np.nan),
                     class_ids=class_ids,
                     keypoint_ids=keypoint_ids,
                     show_labels=False,
@@ -823,7 +785,7 @@ def main(config: BenchmarkHandCalibConfig) -> None:
         hand_keypoint_detector=hand_keypoint_engine,
         config=config.hand_calibrator,
     )
-    calibration_result: HandCalibrationResult = hand_calibrator(
+    hand_calibrator(
         exo_cam_list=exo_sequence.exo_cam_list,
         rgb_ts_batch=rgb_ts_batch,
         parent_log_path=parent_log_path,

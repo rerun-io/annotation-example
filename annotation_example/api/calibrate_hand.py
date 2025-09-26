@@ -305,11 +305,19 @@ def main(config: HandCalibConfig) -> None:
     hand_calibrator = HandCalibrator(
         hand_detector=hand_detection_engine,
         hand_keypoint_detector=hand_keypoint_engine,
-        config=HandCalibratorConfig(mano_optim_iters=30, ts_nano=config.ts_nano, hand_side=config.hand_side),
+        config=HandCalibratorConfig(
+            mano_optim_iters=30, ts_nano=config.ts_nano, hand_side=config.hand_side, verbose=False
+        ),
     )
 
     video_path_list: list[Path] = natsorted(config.videos_dir.glob("*.mp4"))
     mv_reader = MultiVideoReader(video_path_list)
+
+    target_ts_nano: int = config.ts_nano if config.ts_nano is not None else frame_index_to_timestamp(exo_ts, 0)
+    frame_index: int = timestamp_to_frame_index(target_ts_nano, exo_ts)
+    frame_timestamp_ns: int = frame_index_to_timestamp(exo_ts, frame_index)
+    frame_timestamp_seconds: float = frame_timestamp_ns * 1e-9
+    rr.set_time(timeline=timeline, duration=frame_timestamp_seconds)
 
     rgb_ts_batch: UInt8[ndarray, "n_frames n_views H W 3"] = mv_reader_to_rgb_ts_batch(
         mv_reader=mv_reader,
