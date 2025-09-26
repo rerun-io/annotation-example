@@ -1,6 +1,6 @@
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal, NamedTuple
+from typing import Literal
 
 import cv2
 import numpy as np
@@ -43,16 +43,18 @@ def align_rotation(
     eps: float = 1e-8
 
     def compute_direction_matrix(xyz: Float[ndarray, "n_kpts 3"]) -> Float[ndarray, "3 5"]:
-        """Return normalized wrist-to-finger vectors and palm normal for a joint set."""
+        """Return unit wrist directions to the MCP joints plus a palm normal."""
 
         basis: Float[ndarray, "3 5"] = np.full((3, 5), np.nan, dtype=np.float64)
         if xyz.shape[0] <= root_idx:
             return basis
 
+        # Column 0 is treated as the wrist origin for all direction vectors.
         root: Float[ndarray, "3"] = xyz[root_idx].astype(np.float64, copy=False)
         if not np.all(np.isfinite(root)):
             return basis
 
+        # Columns 0–3 store unit vectors from the wrist to each finger's MCP joint.
         for column_idx, joint_idx in enumerate(finger_mcp_indices):
             if joint_idx >= xyz.shape[0]:
                 continue
@@ -65,10 +67,12 @@ def align_rotation(
                 continue
             basis[:, column_idx] = vector / length
 
+        # Collect the finite MCP directions so we can safely form cross products.
         valid_vectors: list[Float[ndarray, "3"]] = [
             basis[:, col].copy() for col in range(4) if np.all(np.isfinite(basis[:, col]))
         ]
 
+        # Column 4 captures an estimated palm normal, falling back to any valid pair if needed.
         normal: Float[ndarray, "3"] | None = None
         if np.all(np.isfinite(basis[:, 0])) and np.all(np.isfinite(basis[:, 3])):
             candidate: Float[ndarray, "3"] = np.cross(basis[:, 0], basis[:, 3])
@@ -93,23 +97,32 @@ def align_rotation(
     mano_xyz_f64: Float[ndarray, "n_kpts 3"] = xyz_mano.astype(np.float64, copy=False)
     triangulated_xyz_f64: Float[ndarray, "n_kpts 3"] = xyz_triangulated.astype(np.float64, copy=False)
 
+    # Build orthonormal wrist-to-finger bases for the canonical MANO pose and the observations.
     mano_basis: Float[ndarray, "3 5"] = compute_direction_matrix(mano_xyz_f64)
     triangulated_basis: Float[ndarray, "3 5"] = compute_direction_matrix(triangulated_xyz_f64)
 
+    # Keep only shared, finite basis vectors so the Procrustes fit uses comparable directions.
     valid_mask: np.ndarray = (~np.isnan(mano_basis).any(axis=0)) & (~np.isnan(triangulated_basis).any(axis=0))
     valid_count: int = int(np.count_nonzero(valid_mask))
     if valid_count < 2:
+        # Fewer than two directions leave the wrist frame under-constrained; return identity.
         zero_rotation: Float32[ndarray, "3"] = np.zeros((3,), dtype=np.float32)
         return zero_rotation
 
     mano_basis_valid: Float[ndarray, "3 valid"] = mano_basis[:, valid_mask]
     triangulated_basis_valid: Float[ndarray, "3 valid"] = triangulated_basis[:, valid_mask]
-
+    # Compute the best-fit rotation between the two bases via a 3x3 Procrustes solve.
     covariance: Float[ndarray, "3 3"] = triangulated_basis_valid @ mano_basis_valid.T
-    u_matrix: Float[ndarray, "3 3"]
-    vt_matrix: Float[ndarray, "3 3"]
-    u_matrix, _, vt_matrix = np.linalg.svd(covariance, full_matrices=True)
+    svd_result: tuple[
+        Float[ndarray, "3 3"],
+        Float[ndarray, "3"],
+        Float[ndarray, "3 3"],
+    ] = np.linalg.svd(covariance, full_matrices=True)
+    u_matrix: Float[ndarray, "3 3"] = svd_result[0]
+    _singular_values: Float[ndarray, "3"] = svd_result[1]
+    vt_matrix: Float[ndarray, "3 3"] = svd_result[2]
 
+    # Enforce a proper rotation (determinant +1) before extracting Rodrigues parameters.
     uv_t: Float[ndarray, "3 3"] = u_matrix @ vt_matrix
     det_uv_t: float = float(np.linalg.det(uv_t))
     corrected_diag: Float[ndarray, "3 3"] = np.eye(3, dtype=np.float64)
@@ -117,6 +130,7 @@ def align_rotation(
 
     rotation_matrix: Float[ndarray, "3 3"] = u_matrix @ corrected_diag @ vt_matrix
 
+    # Rodrigues gives the axis-angle vector expected by MANO from the corrected rotation matrix.
     rotvec_matrix: Float[ndarray, "3 1"] = cv2.Rodrigues(rotation_matrix.astype(np.float64, copy=False))[0]
     rotation_vec: Float32[ndarray, "3"] = rotvec_matrix.reshape(-1).astype(np.float32, copy=False)
     return rotation_vec
@@ -158,12 +172,16 @@ class HandCalibrationResult:
     """MANO mesh, joint, and topology outputs when available; ``None`` when optimisation is skipped."""
 
 
-class ParsedDetections(NamedTuple):
+@dataclass(slots=True)
+class DetectionResults:
     """Convenience container bundling multi-view detections for triangulation."""
 
     uvc_coco_batch: Float[ndarray, "n_views n_kpts=133 3"]
+    """Stack of per-camera COCO-133 detections with confidence columns."""
     right_hand_kpts: KeypointResults | None
+    """Most confident right-hand keypoint detection, if present."""
     left_hand_kpts: KeypointResults | None
+    """Most confident left-hand keypoint detection, if present."""
 
 
 @dataclass
@@ -206,7 +224,7 @@ class HandCalibrator:
 
         rgb_list: UInt8[ndarray, "n_views H W 3"] = rgb_ts_batch[0]
 
-        parsed_detections: ParsedDetections = self._detect_keypoints(
+        parsed_detections: DetectionResults = self._detect_keypoints(
             rgb_list=rgb_list,
             pinhole_param_list=exo_cam_list,
             parent_log_path=parent_log_path,
@@ -241,7 +259,7 @@ class HandCalibrator:
         rgb_list: UInt8[ndarray, "n_views H W 3"],
         pinhole_param_list: list[PinholeParameters],
         parent_log_path: Path,
-    ) -> ParsedDetections:
+    ) -> DetectionResults:
         uvc_coco_list: list[Float[ndarray, "coco_kpts=133 3"]] = []
         right_hand_kpts: KeypointResults | None = None
         left_hand_kpts: KeypointResults | None = None
@@ -311,7 +329,7 @@ class HandCalibrator:
             uvc_coco_list.append(uvc_coco)
 
         uvc_coco_batch: Float[ndarray, "n_views coco_kpts=133 3"] = np.stack(uvc_coco_list)
-        return ParsedDetections(
+        return DetectionResults(
             uvc_coco_batch=uvc_coco_batch,
             right_hand_kpts=right_hand_kpts,
             left_hand_kpts=left_hand_kpts,
@@ -369,7 +387,7 @@ class HandCalibrator:
         *,
         xyz: Float[ndarray, "coco_kpts=133 3"],
         confidences: Float[ndarray, "coco_kpts=133"],
-        parsed_detections: ParsedDetections,
+        parsed_detections: DetectionResults,
         pinhole_param_list: list[PinholeParameters],
         calibration_root: Path,
     ) -> ManoOptimizationResult:
@@ -468,6 +486,7 @@ class HandCalibrator:
             Float32[ndarray, "n_frames n_verts=778 3"],
             Float32[ndarray, "n_frames mp_kpts=21 3"],
         ] = mano_init_layer(so3_init_aligned, trans_init_f32)
+
         verts_aligned_pre: Float32[ndarray, "n_frames n_verts=778 3"] = mano_aligned_pre_results[0]
         joints_aligned_pre: Float32[ndarray, "n_frames mp_kpts=21 3"] = mano_aligned_pre_results[1]
 
