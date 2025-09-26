@@ -148,12 +148,14 @@ class TriangulationResult:
 
 @dataclass(slots=True)
 class ManoOptimizationResult:
-    """Outputs from the MANO pose/shape optimisation routine."""
+    """Optimised MANO pose/shape parameters to recreate vertices on demand."""
 
-    vertices: Float32[ndarray, "n_verts=778 3"]
-    """Per-vertex MANO mesh coordinates for the optimised hand pose."""
-    joints: Float32[ndarray, "mp_kpts=21 3"]
-    """Mediapipe-ordered MANO joint positions in world coordinates."""
+    so3: Float32[ndarray, "n_frames 16 3"]
+    """Axis-angle rotations for the global orientation and 15 joints."""
+    translation: Float32[ndarray, "n_frames 3"]
+    """Per-frame MANO wrist translation in world coordinates."""
+    betas: Float32[ndarray, "10"]
+    """Shape coefficients describing the personalised MANO mesh."""
     faces: Int[ndarray, "n_faces=1538 3"]
     """Triangle indices describing the MANO mesh topology."""
 
@@ -169,7 +171,7 @@ class HandCalibrationResult:
     confidences: Float[ndarray, "n_kpts=133"]
     """Confidence score per COCO-133 keypoint derived from multi-view triangulation."""
     mano: ManoOptimizationResult | None = None
-    """MANO mesh, joint, and topology outputs when available; ``None`` when optimisation is skipped."""
+    """MANO pose/shape parameters (and topology) when optimisation runs; ``None`` otherwise."""
 
 
 @dataclass(slots=True)
@@ -528,19 +530,24 @@ class HandCalibrator:
         optim_shape_tuple: tuple[OptimShapeResult, LevenbergMarquardtState] = optimizer_shape(optim_shape_input)
         optim_shape_result: OptimShapeResult = optim_shape_tuple[0]
 
-        beta_optim: Float[ndarray, "10"] = optim_shape_result.beta_optim.astype(np.float32, copy=False)
+        beta_optim: Float32[ndarray, "10"] = optim_shape_result.beta_optim.astype(np.float32, copy=False)
 
         mano_optim_layer = MANOLayerNP(side=hand_side, betas=beta_optim)
+
+        so3_optim_flat: Float32[ndarray, "n_frames 48"] = optim_shape_result.so3_optim.astype(np.float32, copy=False)
+        trans_optim: Float32[ndarray, "n_frames 3"] = optim_shape_result.trans_optim.astype(np.float32, copy=False)
 
         mano_optim_results: tuple[
             Float32[ndarray, "n_frames n_verts=778 3"],
             Float32[ndarray, "n_frames mp_kpts=21 3"],
         ] = mano_optim_layer(
-            optim_shape_result.so3_optim.astype(np.float32, copy=False),
-            optim_shape_result.trans_optim.astype(np.float32, copy=False),
+            so3_optim_flat,
+            trans_optim,
         )
         verts_optim: Float32[ndarray, "n_frames n_verts=778 3"] = mano_optim_results[0]
         joints_optim: Float32[ndarray, "n_frames mp_kpts=21 3"] = mano_optim_results[1]
+
+        so3_optim: Float32[ndarray, "n_frames 16 3"] = so3_optim_flat.reshape(so3_optim_flat.shape[0], 16, 3)
 
         faces_np: Int[ndarray, "n_faces=1538 3"] = mano_optim_layer.f.astype(np.int32)
         normals_naive: Float32[ndarray, "n_frames n_verts=778 3"] = compute_vertex_normals_batch(
@@ -625,8 +632,9 @@ class HandCalibrator:
             )
 
         mano_result = ManoOptimizationResult(
-            vertices=verts_aligned_optim,
-            joints=joints_aligned_optim,
+            so3=so3_optim,
+            translation=trans_optim,
+            betas=beta_optim,
             faces=faces_np,
         )
         return mano_result
