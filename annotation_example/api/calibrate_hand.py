@@ -28,12 +28,10 @@ from wilor_nano.hand_detection import HandDetector, HandDetectorConfig
 from wilor_nano.hand_keypoints import HandKeypointDetectorConfig, WilorHandKeypointDetector
 
 from annotation_example.api.benchmark_hand_calib import (
-    HandCalibrationResult,
-    HandCalibrator,
-    HandCalibratorConfig,
     mv_reader_to_rgb_ts_batch,
 )
 from annotation_example.api.calibrate_mv_videos import MultiViewCalibrator, MVCalibResults
+from annotation_example.hand_calibrator import HandCalibrationResult, HandCalibrator, HandCalibratorConfig
 from annotation_example.rr_blueprints import create_view_container
 
 np.set_printoptions(suppress=True)
@@ -322,7 +320,7 @@ def main(config: HandCalibConfig) -> None:
     rgb_ts_batch: UInt8[ndarray, "n_frames n_views H W 3"] = mv_reader_to_rgb_ts_batch(
         mv_reader=mv_reader,
         num_frames=1,
-        ts_nanos=config.ts_nano,
+        ts_nanos=target_ts_nano,
         frame_timestamps_ns=exo_ts,
     )
 
