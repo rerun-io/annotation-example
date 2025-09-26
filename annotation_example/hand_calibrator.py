@@ -102,7 +102,7 @@ def align_rotation(
     triangulated_basis: Float[ndarray, "3 5"] = compute_direction_matrix(triangulated_xyz_f64)
 
     # Keep only shared, finite basis vectors so the Procrustes fit uses comparable directions.
-    valid_mask: np.ndarray = (~np.isnan(mano_basis).any(axis=0)) & (~np.isnan(triangulated_basis).any(axis=0))
+    valid_mask: ndarray = (~np.isnan(mano_basis).any(axis=0)) & (~np.isnan(triangulated_basis).any(axis=0))
     valid_count: int = int(np.count_nonzero(valid_mask))
     if valid_count < 2:
         # Fewer than two directions leave the wrist frame under-constrained; return identity.
