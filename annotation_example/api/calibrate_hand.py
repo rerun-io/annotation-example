@@ -308,26 +308,27 @@ def main(config: HandCalibConfig) -> None:
         ),
     )
 
-    video_path_list: list[Path] = natsorted(config.videos_dir.glob("*.mp4"))
-    mv_reader = MultiVideoReader(video_path_list)
+    if config.videos_dir is not None and exo_ts is not None:
+        video_path_list: list[Path] = natsorted(config.videos_dir.glob("*.mp4"))
+        mv_reader = MultiVideoReader(video_path_list)
 
-    target_ts_nano: int = config.ts_nano if config.ts_nano is not None else frame_index_to_timestamp(exo_ts, 0)
-    frame_index: int = timestamp_to_frame_index(target_ts_nano, exo_ts)
-    frame_timestamp_ns: int = frame_index_to_timestamp(exo_ts, frame_index)
-    frame_timestamp_seconds: float = frame_timestamp_ns * 1e-9
-    rr.set_time(timeline=timeline, duration=frame_timestamp_seconds)
+        target_ts_nano: int = config.ts_nano if config.ts_nano is not None else frame_index_to_timestamp(exo_ts, 0)
+        frame_index: int = timestamp_to_frame_index(target_ts_nano, exo_ts)
+        frame_timestamp_ns: int = frame_index_to_timestamp(exo_ts, frame_index)
+        frame_timestamp_seconds: float = frame_timestamp_ns * 1e-9
+        rr.set_time(timeline=timeline, duration=frame_timestamp_seconds)
 
-    rgb_ts_batch: UInt8[ndarray, "n_frames n_views H W 3"] = mv_reader_to_rgb_ts_batch(
-        mv_reader=mv_reader,
-        num_frames=1,
-        ts_nanos=target_ts_nano,
-        frame_timestamps_ns=exo_ts,
-    )
+        rgb_ts_batch: UInt8[ndarray, "n_frames n_views H W 3"] = mv_reader_to_rgb_ts_batch(
+            mv_reader=mv_reader,
+            num_frames=1,
+            ts_nanos=target_ts_nano,
+            frame_timestamps_ns=exo_ts,
+        )
 
-    hand_calib_result: HandCalibrationResult = hand_calibrator(
-        exo_cam_list=pinhole_param_list,
-        rgb_ts_batch=rgb_ts_batch,
-        parent_log_path=parent_log_path,
-    )
+        hand_calib_result: HandCalibrationResult = hand_calibrator(
+            exo_cam_list=pinhole_param_list,
+            rgb_ts_batch=rgb_ts_batch,
+            parent_log_path=parent_log_path,
+        )
 
     print(f"Inference completed in {timer() - start:.2f} seconds")
