@@ -122,7 +122,29 @@ def align_rotation(
     return rotation_vec
 
 
-@dataclass
+@dataclass(slots=True)
+class TriangulationResult:
+    """Triangulated keypoints inferred from multi-view observations."""
+
+    xyz: Float[ndarray, "n_kpts=133 3"]
+    """COCO-133 keypoint positions in world coordinates."""
+    confidences: Float[ndarray, "n_kpts=133"]
+    """Confidence score per COCO-133 keypoint derived from triangulation view counts."""
+
+
+@dataclass(slots=True)
+class ManoOptimizationResult:
+    """Outputs from the MANO pose/shape optimisation routine."""
+
+    vertices: Float32[ndarray, "n_verts=778 3"]
+    """Per-vertex MANO mesh coordinates for the optimised hand pose."""
+    joints: Float32[ndarray, "mp_kpts=21 3"]
+    """Mediapipe-ordered MANO joint positions in world coordinates."""
+    faces: Int[ndarray, "n_faces=1538 3"]
+    """Triangle indices describing the MANO mesh topology."""
+
+
+@dataclass(slots=True)
 class HandCalibrationResult:
     """Outputs from a single calibration pass for downstream consumers."""
 
@@ -132,12 +154,8 @@ class HandCalibrationResult:
     """Triangulated 3D COCO-133 keypoints at the calibrated timestamp."""
     confidences: Float[ndarray, "n_kpts=133"]
     """Confidence score per COCO-133 keypoint derived from multi-view triangulation."""
-    # mano_vertices: Float32[ndarray, "n_verts=778 3"]
-    # """Optimized MANO vertex positions for the requested hand."""
-    # mano_joints: Float32[ndarray, "n_joints=21 3"]
-    # """Optimized MANO joint positions matching Mediapipe ordering."""
-    # mano_faces: Int[ndarray, "n_faces=1538 3"]
-    # """Triangle indices describing the MANO mesh topology."""
+    mano: ManoOptimizationResult | None = None
+    """MANO mesh, joint, and topology outputs when available; ``None`` when optimisation is skipped."""
 
 
 class ParsedDetections(NamedTuple):
@@ -194,22 +212,15 @@ class HandCalibrator:
             parent_log_path=parent_log_path,
         )
 
-        triangulation_result: tuple[
-            Float[ndarray, "n_kpts=133 3"],
-            Float[ndarray, "n_kpts=133"],
-        ] = self._triangulate_keypoints(
+        triangulation_result: TriangulationResult = self._triangulate_keypoints(
             parsed_detections.uvc_coco_batch,
             exo_cam_list,
             calibration_root=calibration_root,
         )
-        xyz: Float[ndarray, "n_kpts=133 3"]
-        conf_values: Float[ndarray, "n_kpts=133"]
-        xyz, conf_values = triangulation_result
+        xyz: Float[ndarray, "n_kpts=133 3"] = triangulation_result.xyz
+        conf_values: Float[ndarray, "n_kpts=133"] = triangulation_result.confidences
 
-        mano_vertices: Float32[ndarray, "n_verts=778 3"]
-        mano_joints: Float32[ndarray, "n_joints=21 3"]
-        mano_faces: Int[ndarray, "n_faces=1538 3"]
-        mano_vertices, mano_joints, mano_faces = self._optimize_mano(
+        mano_result: ManoOptimizationResult = self._optimize_mano(
             xyz=xyz,
             confidences=conf_values,
             parsed_detections=parsed_detections,
@@ -221,9 +232,7 @@ class HandCalibrator:
             pinhole_param_list=exo_cam_list,
             xyz=xyz,
             confidences=conf_values,
-            # mano_vertices=mano_vertices,
-            # mano_joints=mano_joints,
-            # mano_faces=mano_faces,
+            mano=mano_result,
         )
 
     def _detect_keypoints(
@@ -314,7 +323,7 @@ class HandCalibrator:
         pinhole_param_list: list[PinholeParameters],
         *,
         calibration_root: Path,
-    ) -> tuple[Float[ndarray, "coco_kpts=133 3"], Float[ndarray, "coco_kpts=133"]]:
+    ) -> TriangulationResult:
         uvc_triangulate_batch: Float[ndarray, "n_views coco_kpts=133 3"] = np.nan_to_num(
             uvc_coco_batch.copy(),
             nan=0.0,
@@ -349,7 +358,11 @@ class HandCalibrator:
                 colors=conf_colors[0],
             ),
         )
-        return xyz, conf_values
+        triangulation_result = TriangulationResult(
+            xyz=xyz,
+            confidences=conf_values,
+        )
+        return triangulation_result
 
     def _optimize_mano(
         self,
@@ -359,11 +372,7 @@ class HandCalibrator:
         parsed_detections: ParsedDetections,
         pinhole_param_list: list[PinholeParameters],
         calibration_root: Path,
-    ) -> tuple[
-        Float32[ndarray, "n_verts=778 3"],
-        Float32[ndarray, "mp_kpts=21 3"],
-        Int[ndarray, "n_faces=1538 3"],
-    ]:
+    ) -> ManoOptimizationResult:
         hand_side: Literal["left", "right"] = self.config.hand_side
         uv_exo_stack: Float[ndarray, "n_frames=1 n_views n_kpts=133 2"] = parsed_detections.uvc_coco_batch[
             np.newaxis, :, :, 0:2
@@ -422,9 +431,12 @@ class HandCalibrator:
 
         so3_init_naive: Float32[ndarray, "b 48"] = so3_init.astype(np.float32, copy=True)
         trans_init_f32: Float32[ndarray, "b 3"] = trans_init.astype(np.float32, copy=False)
-        verts_naive: Float32[ndarray, "n_frames n_verts=778 3"]
-        joints_naive: Float32[ndarray, "n_frames mp_kpts=21 3"]
-        verts_naive, joints_naive = mano_init_layer(so3_init_naive, trans_init_f32)
+        mano_naive_results: tuple[
+            Float32[ndarray, "n_frames n_verts=778 3"],
+            Float32[ndarray, "n_frames mp_kpts=21 3"],
+        ] = mano_init_layer(so3_init_naive, trans_init_f32)
+        verts_naive: Float32[ndarray, "n_frames n_verts=778 3"] = mano_naive_results[0]
+        joints_naive: Float32[ndarray, "n_frames mp_kpts=21 3"] = mano_naive_results[1]
 
         hand_xyz_masked: Float32[ndarray, "n_hand 3"] = hand_xyz.astype(np.float32, copy=True)
         hand_xyz_masked[~valid_hand_mask] = np.nan
@@ -452,18 +464,24 @@ class HandCalibrator:
             composed_rotvec: Float[ndarray, "3 1"] = cv2.Rodrigues(composed_matrix)[0]
             so3_init_aligned[frame_idx, 0:3] = composed_rotvec.reshape(3).astype(np.float32)
 
-        verts_aligned_pre: Float32[ndarray, "n_frames n_verts=778 3"]
-        joints_aligned_pre: Float32[ndarray, "n_frames mp_kpts=21 3"]
-        verts_aligned_pre, joints_aligned_pre = mano_init_layer(so3_init_aligned, trans_init_f32)
+        mano_aligned_pre_results: tuple[
+            Float32[ndarray, "n_frames n_verts=778 3"],
+            Float32[ndarray, "n_frames mp_kpts=21 3"],
+        ] = mano_init_layer(so3_init_aligned, trans_init_f32)
+        verts_aligned_pre: Float32[ndarray, "n_frames n_verts=778 3"] = mano_aligned_pre_results[0]
+        joints_aligned_pre: Float32[ndarray, "n_frames mp_kpts=21 3"] = mano_aligned_pre_results[1]
 
         root_delta: Float32[ndarray, "3"] = (joints_naive[0, 0] - joints_aligned_pre[0, 0]).astype(np.float32)
         trans_init_aligned: Float32[ndarray, "b 3"] = (
             trans_init_f32 + root_delta[np.newaxis, :] + translation_offset[np.newaxis, :]
         )
 
-        verts_aligned_init: Float32[ndarray, "n_frames n_verts=778 3"]
-        joints_aligned_init: Float32[ndarray, "n_frames mp_kpts=21 3"]
-        verts_aligned_init, joints_aligned_init = mano_init_layer(so3_init_aligned, trans_init_aligned)
+        mano_aligned_init_results: tuple[
+            Float32[ndarray, "n_frames n_verts=778 3"],
+            Float32[ndarray, "n_frames mp_kpts=21 3"],
+        ] = mano_init_layer(so3_init_aligned, trans_init_aligned)
+        verts_aligned_init: Float32[ndarray, "n_frames n_verts=778 3"] = mano_aligned_init_results[0]
+        joints_aligned_init: Float32[ndarray, "n_frames mp_kpts=21 3"] = mano_aligned_init_results[1]
 
         so3_init = so3_init_aligned
         trans_init = trans_init_aligned
@@ -495,10 +513,15 @@ class HandCalibrator:
 
         mano_optim_layer = MANOLayerNP(side=hand_side, betas=beta_optim)
 
-        verts_optim, joints_optim = mano_optim_layer(
+        mano_optim_results: tuple[
+            Float32[ndarray, "n_frames n_verts=778 3"],
+            Float32[ndarray, "n_frames mp_kpts=21 3"],
+        ] = mano_optim_layer(
             optim_shape_result.so3_optim.astype(np.float32, copy=False),
             optim_shape_result.trans_optim.astype(np.float32, copy=False),
         )
+        verts_optim: Float32[ndarray, "n_frames n_verts=778 3"] = mano_optim_results[0]
+        joints_optim: Float32[ndarray, "n_frames mp_kpts=21 3"] = mano_optim_results[1]
 
         faces_np: Int[ndarray, "n_faces=1538 3"] = mano_optim_layer.f.astype(np.int32)
         normals_naive: Float32[ndarray, "n_frames n_verts=778 3"] = compute_vertex_normals_batch(
@@ -582,4 +605,9 @@ class HandCalibrator:
                 ),
             )
 
-        return verts_aligned_optim, joints_aligned_optim, faces_np
+        mano_result = ManoOptimizationResult(
+            vertices=verts_aligned_optim,
+            joints=joints_aligned_optim,
+            faces=faces_np,
+        )
+        return mano_result
