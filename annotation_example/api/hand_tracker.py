@@ -1,13 +1,12 @@
 from dataclasses import dataclass, field
+from itertools import islice
 from pathlib import Path
 from timeit import default_timer as timer
-from typing import NamedTuple
 
-import cv2
 import numpy as np
 import rerun as rr
 import rerun.blueprint as rrb
-from jaxtyping import Float, Int, UInt8
+from jaxtyping import Float32, Int, UInt8
 from numpy import ndarray
 from simplecv.apis.view_exoego import (
     LogPaths,
@@ -18,7 +17,8 @@ from simplecv.apis.view_exoego import (
 )
 from simplecv.configs.exoego_dataset_configs import AnnotatedExoEgoDatasetUnion
 from simplecv.data.exo.base_exo import BaseExoSequence
-from simplecv.data.exoego.base_exoego import BaseExoEgoSequence
+from simplecv.data.exoego.base_exoego import BaseExoEgoSequence, ExoEgoLabels
+from simplecv.data.exoego.hocap import HocapSequence
 from simplecv.data.skeleton.coco_133 import (
     COCO_133_ID2NAME,
     COCO_133_LINKS,
@@ -28,29 +28,14 @@ from simplecv.rerun_log_utils import (
     RerunTyroConfig,
 )
 from simplecv.video_io import MultiVideoReader
+from tqdm import tqdm
 from wilor_nano.hand_detection import HandDetector, HandDetectorConfig
 from wilor_nano.hand_keypoints import (
     HandKeypointDetectorConfig,
     WilorHandKeypointDetector,
 )
+
 from annotation_example.mv_hand_tracker import MultiViewHandTracker, MultiViewHandTrackerConfig
-
-
-def timestamp_to_frame_index(time_ns: int, frame_timestamps_ns: Int[ndarray, "num_frames"]) -> int:
-    """Return the frame index at or before ``time_ns`` for monotonic timestamps."""
-
-    idx: int = int(np.searchsorted(frame_timestamps_ns, time_ns, side="right") - 1)
-    return max(0, min(idx, len(frame_timestamps_ns) - 1))
-
-
-def frame_index_to_timestamp(frame_timestamps_ns: Int[ndarray, "num_frames"], frame_index: int) -> int:
-    """Return the nanosecond timestamp associated with ``frame_index``."""
-
-    if frame_index < 0 or frame_index >= int(frame_timestamps_ns.shape[0]):
-        msg = f"frame_index {frame_index} is outside the valid range [0, {frame_timestamps_ns.shape[0] - 1}]"
-        raise IndexError(msg)
-    timestamp_ns: int = int(frame_timestamps_ns[frame_index])
-    return timestamp_ns
 
 
 def set_annotation_context(recording: rr.RecordingStream | None = None) -> None:
@@ -89,7 +74,7 @@ def set_annotation_context(recording: rr.RecordingStream | None = None) -> None:
 
 
 @dataclass
-class BenchmarkHandCalibConfig:
+class HandTrackingConfig:
     """CLI configuration controlling dataset selection and calibration behaviour."""
 
     rr_config: RerunTyroConfig
@@ -98,12 +83,25 @@ class BenchmarkHandCalibConfig:
     """Dataset specification defining which ego/exo sequence to process."""
     log_labels: bool = False
     """Whether to stream ground-truth labels alongside calibration outputs."""
+    max_frames: int | None = 200
+    """Maximum frames to process for debugging speed; ``None`` processes all."""
+    mv_config: MultiViewHandTrackerConfig = field(default_factory=MultiViewHandTrackerConfig)
+    """Parameters forwarded to the multi-view tracker."""
 
 
-def main(config: BenchmarkHandCalibConfig) -> None:
+def main(config: HandTrackingConfig) -> None:
     start_time: float = timer()
-    exoego_sequence: BaseExoEgoSequence = config.dataset.setup()  # one-liner
-    # only ever accept Hocap dataset for now
+    exoego_sequence: BaseExoEgoSequence = config.dataset.setup()
+    if not isinstance(exoego_sequence, HocapSequence):
+        msg = "multi-view hand tracking currently supports only `HocapSequence` datasets"
+        raise TypeError(msg)
+
+    hocap_sequence: HocapSequence = exoego_sequence
+    hocap_labels: ExoEgoLabels | None = hocap_sequence.exoego_labels
+    if hocap_labels is None or hocap_labels.mano_stack is None:
+        msg = "HocapSequence must expose MANO labels to recover subject betas"
+        raise ValueError(msg)
+
     rr.log("/", exoego_sequence.world_coordinate_system, static=True)
     set_annotation_context()
 
@@ -131,16 +129,34 @@ def main(config: BenchmarkHandCalibConfig) -> None:
     hand_detection_engine = HandDetector(HandDetectorConfig(verbose=False))
     hand_keypoint_engine = WilorHandKeypointDetector(HandKeypointDetectorConfig(verbose=False))
 
-    exo_sequence: BaseExoSequence | None = exoego_sequence.exo_sequence
+    exo_sequence: BaseExoSequence | None = hocap_sequence.exo_sequence
     if exo_sequence is None:
         raise ValueError("Selected dataset does not expose an exocentric camera rig.")
 
+    betas: Float32[ndarray, "10"] = hocap_labels.mano_stack.betas.astype(np.float32, copy=False)
     mv_hand_tracker = MultiViewHandTracker(
-        config=MultiViewHandTrackerConfig(detection_confidence=0.5, verbose=False),
+        config=config.mv_config,
         hand_detector=hand_detection_engine,
         hand_keypoint_detector=hand_keypoint_engine,
-        betas=np.zeros((10,), dtype=np.float32),
+        betas=betas,
         parent_log_path=parent_log_path,
     )
+
+    exo_video_readers: MultiVideoReader = exo_sequence.exo_video_readers
+
+    total_frames: int = len(shortest_timestamp)
+    if config.max_frames is not None:
+        total_frames = min(total_frames, config.max_frames)
+
+    limited_iter = islice(zip(shortest_timestamp, exo_video_readers), total_frames)
+
+    for ts_idx, (ts_nano, rgb_list) in enumerate(tqdm(limited_iter, total=total_frames)):
+        rr.set_time(timeline=timeline, duration=ts_nano * 1e-9)
+        rgb_batch: UInt8[ndarray, "n_views H W 3"] = np.stack(rgb_list, axis=0)
+        mv_hand_tracker(
+            rgb_batch=rgb_batch,
+            pinhole_param_list=exo_sequence.exo_cam_list,
+            recording=config.rr_config.rec_stream,
+        )
 
     print(f"Total time taken: {timer() - start_time:.2f} seconds")
