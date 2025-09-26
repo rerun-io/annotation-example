@@ -180,6 +180,7 @@ cython_debug/
 data/*
 pretrained_models/*
 
+
 # START Ruler Generated Files
 /.clinerules
 /.clinerules.bak
