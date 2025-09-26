@@ -25,11 +25,11 @@ from monopriors.relative_depth_models.base_relative_depth import BaseRelativePre
 from numpy import ndarray
 from PIL import Image
 from rtmlib import RTMPose
+from rtmlib.visualization import coco17
 from serde import serde
 from serde.json import from_json, to_json
-from simplecv.apis.convert_to_rrd import confidence_scores_to_rgb
 from simplecv.camera_parameters import Extrinsics, Intrinsics, PinholeParameters
-from simplecv.rerun_log_utils import Points2DWithConfidence
+from simplecv.rerun_log_utils import Points2DWithConfidence, confidence_scores_to_rgb
 from torchvision import transforms
 from transformers import AutoModelForImageSegmentation
 
@@ -43,7 +43,20 @@ from annotation_example.gradio_ui.person_annot_utils import (
     XYXYContainer,
     get_recording,
 )
-from annotation_example.skeletons import COCO_17_ID2NAME, COCO_17_IDS, COCO_17_LINKS, COCO_17_NAME2ID
+
+COCO_17_IDS: list[int] = [id for id, _ in coco17["keypoint_info"].items()]
+link_dict_17 = {}
+for _, kpt_info in coco17["keypoint_info"].items():
+    link_dict_17[kpt_info["name"]] = kpt_info["id"]
+
+COCO_17_LINKS: list[tuple[int, int]] = []
+for _, ske_info in coco17["skeleton_info"].items():
+    link = ske_info["link"]
+    COCO_17_LINKS.append((link_dict_17[link[0]], link_dict_17[link[1]]))
+
+COCO_17_ID2NAME: dict[int, str] = {id: kpt_info["name"] for id, kpt_info in coco17["keypoint_info"].items()}
+COCO_17_NAME2ID: dict[str, int] = {kpt_info["name"]: id for id, kpt_info in coco17["keypoint_info"].items()}
+print("COCO_17_NAME2ID", COCO_17_NAME2ID)
 
 
 @serde
