@@ -4,8 +4,9 @@ from typing import Literal
 
 import numpy as np
 import rerun as rr
-from jaxtyping import Bool, Float, Float32, UInt8
+from jaxtyping import Bool, Float, Float32, Int, UInt8
 from numpy import ndarray
+from simplecv.apis.view_exoego import compute_vertex_normals_batch
 from simplecv.camera_parameters import PinholeParameters
 from simplecv.data.skeleton.coco_133 import LEFT_HAND_IDX, RIGHT_HAND_IDX
 from simplecv.data.skeleton.mediapipe import MEDIAPIPE_IDS
@@ -19,6 +20,8 @@ from simplecv.rerun_log_utils import (
 )
 from wilor_nano.hand_detection import DetectionResult, HandDetector
 from wilor_nano.hand_keypoints import KeypointResults, WilorHandKeypointDetector
+
+from annotation_example.hand_calibrator import align_rotation
 
 HandLabel = Literal["left", "right"]
 HAND_LABELS: tuple[HandLabel, HandLabel] = ("left", "right")
@@ -319,88 +322,7 @@ class MultiViewHandTracker:
             hand_side=hand_label,
         )
 
-        optimizer: SingleHandOptim = (
-            self.left_hand_optimizer if hand_label == "left" else self.right_hand_optimizer
-        )
-
-        n_views: int = int(uvc_batch.shape[0])
-        uv_only: Float32[ndarray, "n_views mp_kpts=21 2"] = uvc_batch[:, :, :2].astype(np.float32, copy=True)
-        confidences_2d: Float32[ndarray, "n_views mp_kpts=21"] = uvc_batch[:, :, 2].astype(np.float32, copy=True)
-        finite_mask: Bool[ndarray, "n_views mp_kpts=21"] = np.isfinite(uv_only[..., 0]) & np.isfinite(uv_only[..., 1])
-        confident_mask: Bool[ndarray, "n_views mp_kpts=21"] = confidences_2d > 0.0
-        valid_mask: Bool[ndarray, "n_views mp_kpts=21"] = finite_mask & confident_mask
-
-        if not np.any(valid_mask):
-            return prev_mano
-
-        uv_only[~valid_mask] = np.nan
-
-        uv_pred: Float32[ndarray, "1 n_views 133 2"] = np.full(
-            (1, n_views, 133, 2),
-            np.nan,
-            dtype=np.float32,
-        )
-        hand_indices: ndarray = LEFT_HAND_IDX if hand_label == "left" else RIGHT_HAND_IDX
-        uv_pred[0, :, hand_indices, :] = uv_only
-
-        so3_init: Float32[ndarray, "1 48"]
-        trans_init: Float32[ndarray, "1 3"]
-        if mano_init is not None:
-            so3_components: Float32[ndarray, "48"] = np.concatenate(
-                [
-                    mano_init.global_orient.astype(np.float32, copy=False),
-                    mano_init.hand_pose.astype(np.float32, copy=False),
-                ],
-                axis=0,
-            )
-            so3_init = so3_components[np.newaxis, :]
-            trans_init = mano_init.translation.astype(np.float32, copy=False)[np.newaxis, :]
-        else:
-            so3_init = np.zeros((1, 48), dtype=np.float32)
-            trans_init = np.zeros((1, 3), dtype=np.float32)
-            trans_init[0, 2] = 0.6
-
-            if xyzc is not None:
-                xyz_points: Float32[ndarray, "mp_kpts=21 3"] = xyzc[:, :3].astype(np.float32, copy=True)
-                xyz_conf: Float32[ndarray, "mp_kpts=21"] = xyzc[:, 3].astype(np.float32, copy=True)
-                xyz_valid_mask: Bool[ndarray, "mp_kpts=21"] = np.isfinite(xyz_points).all(axis=1) & (xyz_conf > 0.0)
-                if np.any(xyz_valid_mask):
-                    translation_estimate: Float32[ndarray, "3"] = np.nanmean(
-                        xyz_points[xyz_valid_mask],
-                        axis=0,
-                    ).astype(np.float32, copy=False)
-                    trans_init[0] = translation_estimate
-
-        optim_input: OptimInput = OptimInput(
-            uv_pred=uv_pred,
-            so3_init=so3_init,
-            trans_init=trans_init,
-        )
-
-        try:
-            optim_result: OptimResult
-            optim_result, _ = optimizer(optim_input)
-        except Exception:
-            return prev_mano
-
-        so3_optim: Float32[ndarray, "1 48"] = optim_result.so3_optim.astype(np.float32, copy=True)
-        trans_optim: Float32[ndarray, "1 3"] = optim_result.trans_optim.astype(np.float32, copy=True)
-        so3_vector: Float32[ndarray, "48"] = so3_optim[0]
-        global_orient: Float32[ndarray, "3"] = so3_vector[:3]
-        hand_pose: Float32[ndarray, "45"] = so3_vector[3:]
-        translation: Float32[ndarray, "3"] = trans_optim[0]
-
-        if not np.isfinite(global_orient).all() or not np.isfinite(hand_pose).all() or not np.isfinite(translation).all():
-            return prev_mano
-
-        mano_results: ManoResults = ManoResults(
-            global_orient=global_orient,
-            hand_pose=hand_pose,
-            betas=self.betas.astype(np.float32, copy=False),
-            translation=translation,
-        )
-
-        return mano_results
+        return mano_init
 
     def _initialize_mano_params(
         self,
@@ -411,6 +333,131 @@ class MultiViewHandTracker:
     ) -> ManoResults | None:
         """Return previous MANO fit when available; otherwise signal downstream initialization."""
         if prev_mano is not None:
+            # Reuse the prior frame's solution when available.
             return prev_mano
+
+        mano_layer: ManoSimpleLayerNP = self.left_mano_layer if hand_side == "left" else self.right_mano_layer
+
+        # Neutral pose + depth bias serve as an absolute fallback when no observations exist.
+        default_global_orient: Float32[ndarray, "3"] = np.zeros((3,), dtype=np.float32)
+        default_hand_pose: Float32[ndarray, "45"] = np.zeros((45,), dtype=np.float32)
+        default_translation: Float32[ndarray, "3"] = np.array([0.0, 0.0, 0.6], dtype=np.float32)
+
         if xyzc is not None:
-            return None
+            hand_xyz: Float32[ndarray, "mp_kpts=21 3"] = xyzc[:, :3].astype(np.float32, copy=True)
+            confidences: Float32[ndarray, "mp_kpts=21"] = xyzc[:, 3].astype(np.float32, copy=True)
+            valid_mask: Bool[ndarray, "mp_kpts=21"] = np.isfinite(hand_xyz).all(axis=1) & (confidences > 0.0)
+
+            if np.any(valid_mask):
+                # Seed the wrist translation from the triangulated joint.
+                translation_guess: Float32[ndarray, "3"] = (
+                    hand_xyz[valid_mask]
+                    .mean(axis=0)
+                    .astype(
+                        np.float32,
+                        copy=False,
+                    )
+                )
+
+                so3_naive: Float32[ndarray, "1 48"] = np.zeros((1, 48), dtype=np.float32)
+                trans_naive: Float32[ndarray, "1 3"] = translation_guess[np.newaxis, :]
+                betas_batch: Float32[ndarray, "1 10"] = np.broadcast_to(
+                    self.betas.astype(np.float32, copy=False),
+                    (1, self.betas.shape[0]),
+                ).copy()
+
+                # Synthesize a MANO mesh using the neutral pose for comparison purposes.
+                mano_naive_results: tuple[
+                    Float32[ndarray, "1 n_verts=778 3"],
+                    Float32[ndarray, "1 joints=21 3"],
+                ] = mano_layer(so3_naive, betas_batch, trans_naive)
+                verts_naive_m: Float32[ndarray, "n_verts=778 3"] = (mano_naive_results[0][0] / 1000.0).astype(
+                    np.float32, copy=False
+                )
+                joints_naive_m: Float32[ndarray, "joints=21 3"] = (mano_naive_results[1][0] / 1000.0).astype(
+                    np.float32, copy=False
+                )
+
+                hand_xyz_masked: Float32[ndarray, "mp_kpts=21 3"] = hand_xyz.copy()
+                hand_xyz_masked[~valid_mask] = np.nan
+
+                # Align the MANO root orientation with the triangulated MCP directions.
+                rotation_vec: Float32[ndarray, "3"] = align_rotation(joints_naive_m, hand_xyz_masked)
+                so3_aligned: Float32[ndarray, "1 48"] = so3_naive.copy()
+                so3_aligned[0, 0:3] = rotation_vec.astype(np.float32, copy=False)
+
+                # Evaluate the aligned rotation before applying any translation correction.
+                mano_aligned_pre: tuple[
+                    Float32[ndarray, "1 n_verts=778 3"],
+                    Float32[ndarray, "1 joints=21 3"],
+                ] = mano_layer(so3_aligned, betas_batch, trans_naive)
+                joints_aligned_pre_m: Float32[ndarray, "joints=21 3"] = (mano_aligned_pre[1][0] / 1000.0).astype(
+                    np.float32, copy=False
+                )
+
+                # Adjust the translation so aligned joints sit on the triangulated targets.
+                translation_offset: Float32[ndarray, "3"] = (
+                    (hand_xyz[valid_mask] - joints_aligned_pre_m[valid_mask])
+                    .mean(axis=0)
+                    .astype(np.float32, copy=False)
+                )
+
+                trans_aligned: Float32[ndarray, "1 3"] = trans_naive + translation_offset[np.newaxis, :]
+
+                mano_aligned_results: tuple[
+                    Float32[ndarray, "1 n_verts=778 3"],
+                    Float32[ndarray, "1 joints=21 3"],
+                ] = mano_layer(so3_aligned, betas_batch, trans_aligned)
+                verts_aligned_m: Float32[ndarray, "n_verts=778 3"] = (mano_aligned_results[0][0] / 1000.0).astype(
+                    np.float32, copy=False
+                )
+
+                global_orient_init: Float32[ndarray, "3"] = so3_aligned[0, 0:3].astype(np.float32, copy=False)
+                hand_pose_init: Float32[ndarray, "45"] = so3_aligned[0, 3:].astype(np.float32, copy=False)
+                translation_init: Float32[ndarray, "3"] = trans_aligned[0].astype(np.float32, copy=False)
+
+                if self.config.verbose:
+                    # Visual sanity checks of naive vs aligned initial meshes.
+                    faces_np: Int[ndarray, "n_faces=1538 3"] = mano_layer.th_faces.astype(np.int32, copy=False)
+                    normals_naive: Float32[ndarray, "n_verts=778 3"] = compute_vertex_normals_batch(
+                        verts_naive_m[np.newaxis, ...],
+                        faces_np,
+                    )[0].astype(np.float32, copy=False)
+                    normals_aligned: Float32[ndarray, "n_verts=778 3"] = compute_vertex_normals_batch(
+                        verts_aligned_m[np.newaxis, ...],
+                        faces_np,
+                    )[0].astype(np.float32, copy=False)
+                    mano_mesh_path: Path = self.parent_log_path / "mano_init" / hand_side
+                    rr.log(
+                        f"{mano_mesh_path}_init",
+                        rr.Mesh3D(
+                            vertex_positions=verts_naive_m,
+                            triangle_indices=faces_np,
+                            vertex_normals=normals_naive,
+                            albedo_factor=(255, 64, 0, 255),
+                        ),
+                    )
+                    rr.log(
+                        f"{mano_mesh_path}_aligned",
+                        rr.Mesh3D(
+                            vertex_positions=verts_aligned_m,
+                            triangle_indices=faces_np,
+                            vertex_normals=normals_aligned,
+                            albedo_factor=(0, 255, 0, 255),
+                        ),
+                    )
+
+                return ManoResults(
+                    global_orient=global_orient_init,
+                    hand_pose=hand_pose_init,
+                    betas=self.betas.astype(np.float32, copy=False),
+                    translation=translation_init,
+                )
+
+        return ManoResults(
+            # Default neutral pose gives downstream optimizers a deterministic fallback.
+            global_orient=default_global_orient,
+            hand_pose=default_hand_pose,
+            betas=self.betas.astype(np.float32, copy=False),
+            translation=default_translation,
+        )
