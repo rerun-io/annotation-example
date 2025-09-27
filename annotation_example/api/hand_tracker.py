@@ -139,6 +139,7 @@ def main(config: HandTrackingConfig) -> None:
         hand_detector=hand_detection_engine,
         hand_keypoint_detector=hand_keypoint_engine,
         betas=betas,
+        pinhole_param_list=exo_sequence.exo_cam_list,
         parent_log_path=parent_log_path,
     )
 
