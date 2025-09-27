@@ -124,15 +124,21 @@ class MultiViewHandTracker:
 
         for hand_label in HAND_LABELS:
             mano_history: ManoHistory = getattr(hand_state, hand_label)
-            if mano_history.t_mano is None or mano_history.t_minus_1_mano is None:
-                xyxy_batch: Float[ndarray, "n_views 1 4"] = self._detect_hands(
-                    rgb_batch=rgb_batch,
-                    pinhole_param_list=pinhole_param_list,
-                    recording=recording,
-                    hand_label=hand_label,
-                )
-            else:
-                raise NotImplementedError("Tracking not yet implemented")
+            # if mano_history.t_mano is None or mano_history.t_minus_1_mano is None:
+            #     xyxy_batch: Float[ndarray, "n_views 1 4"] = self._detect_hands(
+            #         rgb_batch=rgb_batch,
+            #         pinhole_param_list=pinhole_param_list,
+            #         recording=recording,
+            #         hand_label=hand_label,
+            #     )
+            # else:
+            #     raise NotImplementedError("Tracking not yet implemented")
+            xyxy_batch: Float[ndarray, "n_views 1 4"] = self._detect_hands(
+                rgb_batch=rgb_batch,
+                pinhole_param_list=pinhole_param_list,
+                recording=recording,
+                hand_label=hand_label,
+            )
 
             uvc_batch: Float[ndarray, "n_views mp_kpts=21 3"] = self._detect_hand_keypoints(
                 rgb_batch=rgb_batch,
@@ -155,6 +161,10 @@ class MultiViewHandTracker:
                 prev_mano=mano_history.t_mano,
                 hand_label=hand_label,
             )
+
+            if mano_fit is not None:
+                mano_history.t_minus_1_mano = mano_history.t_mano
+                mano_history.t_mano = mano_fit
 
         return hand_state
 
@@ -323,7 +333,6 @@ class MultiViewHandTracker:
             hand_side=hand_label,
         )
         optimizer: SingleHandOptim = self.left_hand_optimizer if hand_label == "left" else self.right_hand_optimizer
-        mano_layer: ManoSimpleLayerNP = self.left_mano_layer if hand_label == "left" else self.right_mano_layer
 
         n_views: int = int(uvc_batch.shape[0])
         uv_only: Float32[ndarray, "n_views mp_kpts=21 2"] = uvc_batch[:, :, :2].astype(np.float32, copy=True)
@@ -355,30 +364,22 @@ class MultiViewHandTracker:
         optim_input: OptimInput = OptimInput(uv_pred=uv_pred_full, so3_init=so3_init, trans_init=trans_init)
         optim_tuple: tuple[OptimResult, LevenbergMarquardtState] = optimizer(optim_input)
         optim_result: OptimResult = optim_tuple[0]
-        mano_out: tuple[Float32[ndarray, "b n_verts=778 3"], Float32[ndarray, "b joints_and_tips=21 3"]] = mano_layer(
-            th_pose_coeffs=optim_result.so3_optim,
-            th_betas=self.betas[np.newaxis, :],
-            th_trans=optim_result.trans_optim,
-        )
-        if self.config.verbose:
-            mano_mesh_path: Path = self.parent_log_path / "mano_fits" / hand_label
-            verts_m: Float32[ndarray, "n_verts=778 3"] = (mano_out[0][0] / 1000.0).astype(np.float32, copy=False)
-            faces_np: Int[ndarray, "n_faces=1538 3"] = mano_layer.th_faces.astype(np.int32, copy=False)
-            normals: Float32[ndarray, "n_verts=778 3"] = compute_vertex_normals_batch(
-                verts_m[np.newaxis, ...],
-                faces_np,
-            )[0].astype(np.float32, copy=False)
-            rr.log(
-                str(mano_mesh_path),
-                rr.Mesh3D(
-                    vertex_positions=verts_m,
-                    triangle_indices=faces_np,
-                    vertex_normals=normals,
-                    albedo_factor=(64, 128, 255, 255) if hand_label == "left" else (255, 128, 64, 255),
-                ),
-            )
 
-        return mano_init
+        so3_optim: Float32[ndarray, "1 48"] = optim_result.so3_optim.astype(np.float32, copy=False)
+        trans_optim: Float32[ndarray, "1 3"] = optim_result.trans_optim.astype(np.float32, copy=False)
+        global_orient_optim: Float32[ndarray, "3"] = so3_optim[0, 0:3].astype(np.float32, copy=False)
+        hand_pose_optim: Float32[ndarray, "45"] = so3_optim[0, 3:].astype(np.float32, copy=False)
+        translation_optim: Float32[ndarray, "3"] = trans_optim[0].astype(np.float32, copy=False)
+        betas_f32: Float32[ndarray, "10"] = self.betas.astype(np.float32, copy=False)
+
+        mano_fit: ManoResults = ManoResults(
+            global_orient=global_orient_optim,
+            hand_pose=hand_pose_optim,
+            betas=betas_f32,
+            translation=translation_optim,
+        )
+
+        return mano_fit
 
     def _initialize_mano_params(
         self,

@@ -11,6 +11,7 @@ from numpy import ndarray
 from simplecv.apis.view_exoego import (
     LogPaths,
     SceneSetupResult,
+    compute_vertex_normals_batch,
     create_blueprint,
     log_exoego_batch,
     setup_scene,
@@ -35,7 +36,14 @@ from wilor_nano.hand_keypoints import (
     WilorHandKeypointDetector,
 )
 
-from annotation_example.mv_hand_tracker import MultiHandState, MultiViewHandTracker, MultiViewHandTrackerConfig
+from annotation_example.mv_hand_tracker import (
+    HAND_LABELS,
+    ManoHistory,
+    ManoResults,
+    MultiHandState,
+    MultiViewHandTracker,
+    MultiViewHandTrackerConfig,
+)
 
 
 def set_annotation_context(recording: rr.RecordingStream | None = None) -> None:
@@ -71,6 +79,63 @@ def set_annotation_context(recording: rr.RecordingStream | None = None) -> None:
         static=True,
         recording=recording,
     )
+
+
+def log_mano_outputs(
+    *,
+    hand_state: MultiHandState,
+    tracker: MultiViewHandTracker,
+    parent_log_path: Path,
+    recording: rr.RecordingStream | None = None,
+) -> None:
+    """Log optimized MANO meshes for the most recent fits when available."""
+
+    for hand_label in HAND_LABELS:
+        mano_history: ManoHistory = getattr(hand_state, hand_label)
+        mano_result: ManoResults | None = mano_history.t_mano
+        if mano_result is None:
+            continue
+
+        mano_layer = tracker.left_mano_layer if hand_label == "left" else tracker.right_mano_layer
+        global_orient: Float32[ndarray, "3"] = mano_result.global_orient.astype(np.float32, copy=False)
+        hand_pose: Float32[ndarray, "45"] = mano_result.hand_pose.astype(np.float32, copy=False)
+        so3_components: Float32[ndarray, "48"] = np.concatenate(
+            [global_orient, hand_pose],
+            axis=0,
+        )
+        so3_batch: Float32[ndarray, "1 48"] = so3_components[np.newaxis, :]
+        betas_single: Float32[ndarray, "10"] = mano_result.betas.astype(np.float32, copy=False)
+        betas_batch: Float32[ndarray, "1 10"] = betas_single[np.newaxis, :]
+        translation_single: Float32[ndarray, "3"] = mano_result.translation.astype(np.float32, copy=False)
+        trans_batch: Float32[ndarray, "1 3"] = translation_single[np.newaxis, :]
+
+        mano_mesh: tuple[
+            Float32[ndarray, "1 n_verts=778 3"],
+            Float32[ndarray, "1 joints_and_tips=21 3"],
+        ] = mano_layer(
+            th_pose_coeffs=so3_batch,
+            th_betas=betas_batch,
+            th_trans=trans_batch,
+        )
+        verts_mm: Float32[ndarray, "n_verts=778 3"] = mano_mesh[0][0].astype(np.float32, copy=False)
+        verts_m: Float32[ndarray, "n_verts=778 3"] = (verts_mm / 1000.0).astype(np.float32, copy=False)
+        faces_np: Int[ndarray, "n_faces=1538 3"] = mano_layer.th_faces.astype(np.int32, copy=False)
+        normals_batch: Float32[ndarray, "1 n_verts=778 3"] = compute_vertex_normals_batch(
+            verts_m[np.newaxis, ...],
+            faces_np,
+        ).astype(np.float32, copy=False)
+        normals: Float32[ndarray, "n_verts=778 3"] = normals_batch[0]
+        mano_mesh_path: Path = parent_log_path / "mano_fits" / hand_label
+        rr.log(
+            str(mano_mesh_path),
+            rr.Mesh3D(
+                vertex_positions=verts_m,
+                triangle_indices=faces_np,
+                vertex_normals=normals,
+                albedo_factor=(64, 128, 255, 255) if hand_label == "left" else (255, 128, 64, 255),
+            ),
+            recording=recording,
+        )
 
 
 @dataclass
@@ -158,6 +223,13 @@ def main(config: HandTrackingConfig) -> None:
             rgb_batch=rgb_batch,
             pinhole_param_list=exo_sequence.exo_cam_list,
             hand_state=hand_state,
+            recording=config.rr_config.rec_stream,
+        )
+
+        log_mano_outputs(
+            hand_state=hand_state,
+            tracker=mv_hand_tracker,
+            parent_log_path=parent_log_path,
             recording=config.rr_config.rec_stream,
         )
 
