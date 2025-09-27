@@ -83,7 +83,7 @@ class HandTrackingConfig:
     """Dataset specification defining which ego/exo sequence to process."""
     log_labels: bool = False
     """Whether to stream ground-truth labels alongside calibration outputs."""
-    max_frames: int | None = 200
+    max_frames: int | None = None
     """Maximum frames to process for debugging speed; ``None`` processes all."""
     mv_config: MultiViewHandTrackerConfig = field(default_factory=MultiViewHandTrackerConfig)
     """Parameters forwarded to the multi-view tracker."""

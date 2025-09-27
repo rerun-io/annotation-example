@@ -8,7 +8,12 @@ from jaxtyping import Float, Float32, UInt8
 from numpy import ndarray
 from simplecv.camera_parameters import PinholeParameters
 from simplecv.data.skeleton.mediapipe import MEDIAPIPE_IDS
-from simplecv.rerun_log_utils import Points2DWithConfidence, confidence_scores_to_rgb
+from simplecv.ops.triangulate import batch_triangulate
+from simplecv.rerun_log_utils import (
+    Points2DWithConfidence,
+    Points3DWithConfidence,
+    confidence_scores_to_rgb,
+)
 from wilor_nano.hand_detection import DetectionResult, HandDetector
 from wilor_nano.hand_keypoints import KeypointResults, WilorHandKeypointDetector
 
@@ -99,15 +104,23 @@ class MultiViewHandTracker:
                     recording=recording,
                     hand_label=hand_label,
                 )
-                uvc_batch: Float[ndarray, "n_views mp_kpts=21 3"] = self._detect_hand_keypoints(
-                    rgb_batch=rgb_batch,
-                    xyxy_batch=xyxy_batch,
-                    pinhole_param_list=pinhole_param_list,
-                    recording=recording,
-                    hand_label=hand_label,
-                )
             else:
                 raise NotImplementedError("Tracking not yet implemented")
+
+            uvc_batch: Float[ndarray, "n_views mp_kpts=21 3"] = self._detect_hand_keypoints(
+                rgb_batch=rgb_batch,
+                xyxy_batch=xyxy_batch,
+                pinhole_param_list=pinhole_param_list,
+                recording=recording,
+                hand_label=hand_label,
+            )
+
+            xyzc: Float32[ndarray, "mp_kpts=21 4"] | None = self._triangulate_keypoints(
+                hand_uvc=uvc_batch,
+                pinhole_param_list=pinhole_param_list,
+                hand_label=hand_label,
+                recording=recording,
+            )
 
         return hand_state
 
@@ -212,20 +225,57 @@ class MultiViewHandTracker:
     def _triangulate_keypoints(
         self,
         *,
-        uvc_batch: Float[ndarray, "n_views mp_kpts=21 3"],
+        hand_uvc: Float[ndarray, "n_views mp_kpts=21 3"],
         pinhole_param_list: list[PinholeParameters],
+        hand_label: HandLabel,
         recording: rr.RecordingStream | None = None,
-    ) -> Float[ndarray, "mp_kpts=21 3"]:
-        """
-        Triangulate the multi-view keypoints into 3D space. The uvc_batch can contain NaNs for views where no hand was detected.
-        The output is the triangulated keypoints in 3D space, with NaNs for keypoints that could not be triangulated.
-        """
-        raise NotImplementedError("Triangulation not yet implemented")
+    ) -> Float[ndarray, "mp_kpts=21 4"] | None:
+        """Triangulate a single hand's keypoints into world coordinates."""
+
+        view_support: ndarray = np.sum(~np.isnan(hand_uvc[:, :, 0]), axis=0)
+        max_views: int = int(view_support.max()) if view_support.size > 0 else 0
+        if max_views < 2:
+            return None
+
+        hand_uvc_f32: Float32[ndarray, "n_views mp_kpts=21 3"] = hand_uvc.astype(np.float32, copy=True)
+        uvc_for_triangulation: Float32[ndarray, "n_views mp_kpts=21 3"] = np.nan_to_num(hand_uvc_f32, nan=0.0)
+        projection_stack: Float32[ndarray, "n_views 3 4"] = np.stack(
+            [pinhole.projection_matrix for pinhole in pinhole_param_list]
+        ).astype(np.float32)
+
+        xyzc_raw: ndarray = batch_triangulate(
+            uvc_for_triangulation,
+            projection_stack,
+            min_views=2,
+        )
+        xyzc: Float32[ndarray, "mp_kpts=21 4"] = xyzc_raw.astype(np.float32, copy=False)
+        confidences: Float32[ndarray, "mp_kpts=21"] = xyzc[:, 3]
+        invalid_mask: ndarray = confidences <= 0.0  # type: ignore Pyrefly bug
+
+        if np.any(invalid_mask):
+            xyzc[invalid_mask, :3] = np.nan
+
+        if self.config.verbose:
+            hand_log_path: Path = self.parent_log_path / "triangulated" / hand_label
+            rr.log(
+                str(hand_log_path),
+                Points3DWithConfidence(
+                    positions=xyzc[:, :3],
+                    confidences=xyzc[:, 3],
+                    class_ids=0 if hand_label == "left" else 1,
+                    keypoint_ids=MEDIAPIPE_IDS,
+                    show_labels=False,
+                    colors=confidence_scores_to_rgb(confidences[np.newaxis, :, np.newaxis])[0],
+                ),
+                recording=recording,
+            )
+
+        return xyzc
 
     def _fit_mano_model(
         self,
         *,
         xyz: Float[ndarray, "mp_kpts=21 3"],
-    ) -> None:
+    ) -> ManoResults:
         """Fit the MANO model to the triangulated 3D keypoints. The keypoints_3d can contain NaNs for keypoints that could not be triangulated."""
         raise NotImplementedError("MANO fitting not yet implemented")
