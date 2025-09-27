@@ -35,7 +35,7 @@ from wilor_nano.hand_keypoints import (
     WilorHandKeypointDetector,
 )
 
-from annotation_example.mv_hand_tracker import MultiViewHandTracker, MultiViewHandTrackerConfig
+from annotation_example.mv_hand_tracker import MultiHandState, MultiViewHandTracker, MultiViewHandTrackerConfig
 
 
 def set_annotation_context(recording: rr.RecordingStream | None = None) -> None:
@@ -149,13 +149,14 @@ def main(config: HandTrackingConfig) -> None:
         total_frames = min(total_frames, config.max_frames)
 
     limited_iter = islice(zip(shortest_timestamp, exo_video_readers), total_frames)
-
+    hand_state: MultiHandState = MultiHandState()
     for ts_idx, (ts_nano, rgb_list) in enumerate(tqdm(limited_iter, total=total_frames)):
         rr.set_time(timeline=timeline, duration=ts_nano * 1e-9)
         rgb_batch: UInt8[ndarray, "n_views H W 3"] = np.stack(rgb_list, axis=0)
-        mv_hand_tracker(
+        hand_state: MultiHandState = mv_hand_tracker(
             rgb_batch=rgb_batch,
             pinhole_param_list=exo_sequence.exo_cam_list,
+            hand_state=hand_state,
             recording=config.rr_config.rec_stream,
         )
 
