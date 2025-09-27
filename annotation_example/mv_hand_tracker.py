@@ -4,6 +4,7 @@ from typing import Literal
 
 import numpy as np
 import rerun as rr
+from jaxopt._src.levenberg_marquardt import LevenbergMarquardtState
 from jaxtyping import Bool, Float, Float32, Int, UInt8
 from numpy import ndarray
 from simplecv.apis.view_exoego import compute_vertex_normals_batch
@@ -316,11 +317,66 @@ class MultiViewHandTracker:
         """Fit the MANO model to the 2D multi-view keypoints."""
         # start by initializing from previous fit if available, otherwise from 3D keypoints if available,
         # otherwise from a sane default if only a single view is available.
-        mano_init: ManoResults | None = self._initialize_mano_params(
+        mano_init: ManoResults = self._initialize_mano_params(
             prev_mano=prev_mano,
             xyzc=xyzc,
             hand_side=hand_label,
         )
+        optimizer: SingleHandOptim = self.left_hand_optimizer if hand_label == "left" else self.right_hand_optimizer
+        mano_layer: ManoSimpleLayerNP = self.left_mano_layer if hand_label == "left" else self.right_mano_layer
+
+        n_views: int = int(uvc_batch.shape[0])
+        uv_only: Float32[ndarray, "n_views mp_kpts=21 2"] = uvc_batch[:, :, :2].astype(np.float32, copy=True)
+        confidences_2d: Float32[ndarray, "n_views mp_kpts=21"] = uvc_batch[:, :, 2].astype(np.float32, copy=True)
+        finite_mask: Bool[ndarray, "n_views mp_kpts=21"] = np.isfinite(uv_only[..., 0]) & np.isfinite(uv_only[..., 1])
+        confident_mask: Bool[ndarray, "n_views mp_kpts=21"] = confidences_2d > 0.0  # type: ignore Pyrefly bug
+        valid_mask: Bool[ndarray, "n_views mp_kpts=21"] = finite_mask & confident_mask
+        if not np.any(valid_mask):
+            return mano_init
+        uv_only[~valid_mask] = np.nan
+
+        uv_pred_full: Float32[ndarray, "1 n_views 133 2"] = np.full(
+            (1, n_views, 133, 2),
+            np.nan,
+            dtype=np.float32,
+        )
+        fill_idx = RIGHT_HAND_IDX if hand_label == "right" else LEFT_HAND_IDX
+        for view_idx in range(n_views):
+            uv_pred_full[0, view_idx, fill_idx, :] = uv_only[view_idx]
+        so3_components: Float32[ndarray, "48"] = np.concatenate(
+            [
+                mano_init.global_orient.astype(np.float32, copy=False),
+                mano_init.hand_pose.astype(np.float32, copy=False),
+            ],
+            axis=0,
+        )
+        so3_init: Float32[ndarray, "1 48"] = so3_components[np.newaxis, :]
+        trans_init: Float32[ndarray, "1 3"] = mano_init.translation.astype(np.float32, copy=False)[np.newaxis, :]
+        optim_input: OptimInput = OptimInput(uv_pred=uv_pred_full, so3_init=so3_init, trans_init=trans_init)
+        optim_tuple: tuple[OptimResult, LevenbergMarquardtState] = optimizer(optim_input)
+        optim_result: OptimResult = optim_tuple[0]
+        mano_out: tuple[Float32[ndarray, "b n_verts=778 3"], Float32[ndarray, "b joints_and_tips=21 3"]] = mano_layer(
+            th_pose_coeffs=optim_result.so3_optim,
+            th_betas=self.betas[np.newaxis, :],
+            th_trans=optim_result.trans_optim,
+        )
+        if self.config.verbose:
+            mano_mesh_path: Path = self.parent_log_path / "mano_fits" / hand_label
+            verts_m: Float32[ndarray, "n_verts=778 3"] = (mano_out[0][0] / 1000.0).astype(np.float32, copy=False)
+            faces_np: Int[ndarray, "n_faces=1538 3"] = mano_layer.th_faces.astype(np.int32, copy=False)
+            normals: Float32[ndarray, "n_verts=778 3"] = compute_vertex_normals_batch(
+                verts_m[np.newaxis, ...],
+                faces_np,
+            )[0].astype(np.float32, copy=False)
+            rr.log(
+                str(mano_mesh_path),
+                rr.Mesh3D(
+                    vertex_positions=verts_m,
+                    triangle_indices=faces_np,
+                    vertex_normals=normals,
+                    albedo_factor=(64, 128, 255, 255) if hand_label == "left" else (255, 128, 64, 255),
+                ),
+            )
 
         return mano_init
 
@@ -330,8 +386,8 @@ class MultiViewHandTracker:
         prev_mano: ManoResults | None,
         xyzc: Float[ndarray, "mp_kpts=21 4"] | None,
         hand_side: HandLabel,
-    ) -> ManoResults | None:
-        """Return previous MANO fit when available; otherwise signal downstream initialization."""
+    ) -> ManoResults:
+        """Return previous MANO fit when available; otherwise compute a fresh initialization."""
         if prev_mano is not None:
             # Reuse the prior frame's solution when available.
             return prev_mano
