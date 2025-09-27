@@ -1,4 +1,4 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from timeit import default_timer as timer
 from typing import Literal, NamedTuple
@@ -24,6 +24,7 @@ from simplecv.rerun_log_utils import (
     log_video,
 )
 from simplecv.video_io import MultiVideoReader
+from tqdm import tqdm
 from wilor_nano.hand_detection import HandDetector, HandDetectorConfig
 from wilor_nano.hand_keypoints import HandKeypointDetectorConfig, WilorHandKeypointDetector
 
@@ -31,7 +32,13 @@ from annotation_example.api.benchmark_hand_calib import (
     mv_reader_to_rgb_ts_batch,
 )
 from annotation_example.api.calibrate_mv_videos import MultiViewCalibrator, MVCalibResults
+from annotation_example.api.hand_tracker import log_mano_outputs
 from annotation_example.hand_calibrator import HandCalibrationResult, HandCalibrator, HandCalibratorConfig
+from annotation_example.mv_hand_tracker import (
+    MultiHandState,
+    MultiViewHandTracker,
+    MultiViewHandTrackerConfig,
+)
 from annotation_example.rr_blueprints import create_view_container
 
 np.set_printoptions(suppress=True)
@@ -112,6 +119,12 @@ class HandCalibConfig:
     """Whether to refine depth maps during processing. To make them metric"""
     max_frames: int | None = None
     """Maximum number of frames to process. If None, all frames are processed."""
+    tracking_start_ts_nano: int | None = None
+    """Optional nanosecond timestamp to start MANO tracking from; defaults to the calibration timestamp."""
+    tracking_max_frames: int | None = None
+    """Optional number of frames to run MANO tracking for; defaults to all remaining frames."""
+    mv_config: MultiViewHandTrackerConfig = field(default_factory=MultiViewHandTrackerConfig)
+    """Parameters forwarded to the multi-view tracker."""
     output_dir: Path | None = None
     """Output directory for colmap version. If None, results are not saved."""
     hand_side: Literal["left", "right"] = "right"
@@ -330,5 +343,61 @@ def main(config: HandCalibConfig) -> None:
             rgb_ts_batch=rgb_ts_batch,
             parent_log_path=parent_log_path,
         )
+        if hand_calib_result.mano is not None:
+            beta: Float[ndarray, "10"] = hand_calib_result.mano.betas
+
+            tracker_config: MultiViewHandTrackerConfig = config.mv_config
+            mv_hand_tracker = MultiViewHandTracker(
+                config=tracker_config,
+                hand_detector=hand_detection_engine,
+                hand_keypoint_detector=hand_keypoint_engine,
+                betas=beta,
+                pinhole_param_list=pinhole_param_list,
+                parent_log_path=parent_log_path,
+            )
+
+            tracking_reader: MultiVideoReader = MultiVideoReader(video_path_list)
+            hand_state: MultiHandState = MultiHandState()
+
+            total_frames: int = int(exo_ts.shape[0])
+            tracking_start_ts: int = (
+                config.tracking_start_ts_nano
+                if config.tracking_start_ts_nano is not None
+                else (config.ts_nano if config.ts_nano is not None else int(exo_ts[0]))
+            )
+            start_index: int = timestamp_to_frame_index(tracking_start_ts, exo_ts)
+            max_frames: int | None = config.tracking_max_frames
+            end_index: int = total_frames if max_frames is None else min(total_frames, start_index + max_frames)
+
+            if end_index <= start_index:
+                frame_range = range(0)
+            else:
+                frame_range = range(start_index, end_index)
+
+            frame_iter = tqdm(frame_range, total=len(frame_range)) if mv_hand_tracker.config.verbose else frame_range
+
+            for frame_idx in frame_iter:
+                ts_nano: int = int(exo_ts[frame_idx])
+                rr.set_time(timeline=timeline, duration=ts_nano * 1e-9)
+
+                bgr_views: list[UInt8[ndarray, "H W 3"]] = tracking_reader[frame_idx]
+                rgb_views: list[UInt8[ndarray, "H W 3"]] = [
+                    cv2.cvtColor(bgr_hw3, cv2.COLOR_BGR2RGB) for bgr_hw3 in bgr_views
+                ]
+                rgb_batch: UInt8[ndarray, "n_views H W 3"] = np.stack(rgb_views, axis=0)
+
+                hand_state = mv_hand_tracker(
+                    rgb_batch=rgb_batch,
+                    pinhole_param_list=pinhole_param_list,
+                    hand_state=hand_state,
+                    recording=config.rr_config.rec_stream,
+                )
+
+                log_mano_outputs(
+                    hand_state=hand_state,
+                    tracker=mv_hand_tracker,
+                    parent_log_path=parent_log_path,
+                    recording=config.rr_config.rec_stream,
+                )
 
     print(f"Inference completed in {timer() - start:.2f} seconds")
