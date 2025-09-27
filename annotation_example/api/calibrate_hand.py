@@ -396,6 +396,7 @@ def main(config: HandCalibConfig) -> None:
                 log_mano_outputs(
                     hand_state=hand_state,
                     tracker=mv_hand_tracker,
+                    pinhole_param_list=pinhole_param_list,
                     parent_log_path=parent_log_path,
                     recording=config.rr_config.rec_stream,
                 )
