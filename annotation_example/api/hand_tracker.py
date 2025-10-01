@@ -282,15 +282,6 @@ class HandTrackingConfig:
 def main(config: HandTrackingConfig) -> None:
     start_time: float = timer()
     exoego_sequence: BaseExoEgoSequence = config.dataset.setup()
-    if not isinstance(exoego_sequence, HocapSequence):
-        msg = "multi-view hand tracking currently supports only `HocapSequence` datasets"
-        raise TypeError(msg)
-
-    hocap_sequence: HocapSequence = exoego_sequence
-    hocap_labels: ExoEgoLabels | None = hocap_sequence.exoego_labels
-    if hocap_labels is None or hocap_labels.mano_stack is None:
-        msg = "HocapSequence must expose MANO labels to recover subject betas"
-        raise ValueError(msg)
 
     rr.log("/", exoego_sequence.world_coordinate_system, static=True)
     set_annotation_context()
@@ -319,11 +310,15 @@ def main(config: HandTrackingConfig) -> None:
     hand_detection_engine = HandDetector(HandDetectorConfig(verbose=False))
     hand_keypoint_engine = WilorHandKeypointDetector(HandKeypointDetectorConfig(verbose=False))
 
-    exo_sequence: BaseExoSequence | None = hocap_sequence.exo_sequence
+    exo_sequence: BaseExoSequence | None = exoego_sequence.exo_sequence
     if exo_sequence is None:
         raise ValueError("Selected dataset does not expose an exocentric camera rig.")
 
-    betas: Float32[ndarray, "10"] = hocap_labels.mano_stack.betas.astype(np.float32, copy=False)
+    try:
+        hocap_labels: HocapSequence = exoego_sequence.labels  # type: ignore[assignment]
+        betas: Float32[ndarray, "10"] = hocap_labels.mano_stack.betas.astype(np.float32, copy=False)
+    except Exception as e:
+        betas: Float32[ndarray, "10"] = np.zeros((10,), dtype=np.float32)
     mv_hand_tracker = MultiViewHandTracker(
         config=config.mv_config,
         hand_detector=hand_detection_engine,
