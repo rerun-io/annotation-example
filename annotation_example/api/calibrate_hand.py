@@ -10,6 +10,7 @@ import rerun as rr
 import rerun.blueprint as rrb
 import torch
 from jaxtyping import Float, Int, UInt8
+from monopriors.apis.multiview_calibration import MultiViewCalibrator, MultiViewCalibratorConfig, MVCalibResults
 from natsort import natsorted
 from numpy import ndarray
 from simplecv.camera_parameters import PinholeParameters
@@ -31,7 +32,6 @@ from wilor_nano.hand_keypoints import HandKeypointDetectorConfig, WilorHandKeypo
 from annotation_example.api.benchmark_hand_calib import (
     mv_reader_to_rgb_ts_batch,
 )
-from annotation_example.api.calibrate_mv_videos import MultiViewCalibrator, MVCalibResults
 from annotation_example.api.hand_tracker import log_mano_outputs
 from annotation_example.hand_calibrator import HandCalibrationResult, HandCalibrator, HandCalibratorConfig
 from annotation_example.mv_hand_tracker import (
@@ -100,37 +100,6 @@ def set_annotation_context(recording: rr.RecordingStream | None = None) -> None:
     )
 
 
-@dataclass
-class HandCalibConfig:
-    rr_config: RerunTyroConfig
-    image_dir: Path | None = None
-    """Directory containing input images."""
-    videos_dir: Path | None = None
-    """Directory containing input videos."""
-    ts_nano: int | None = None
-    """Optional absolute timestamp in nanoseconds for selecting a video frame (floored to the nearest prior frame)."""
-    keep_top_percent: int | float = 30.0
-    """keep_top_percent: Percentage in [0,100]. Interpreted as the fraction to discard;
-        the top (100 - keep_top_percent)% of pixel scores are kept.
-        E.g. 75 -> keep top 25%; 30 -> keep top 70%."""
-    preprocessing_mode: Literal["crop", "pad"] = "crop"
-    """Mode for image preprocessing: 'crop' preserves aspect ratio, 'pad' adds white padding"""
-    refine_depth_maps: bool = False
-    """Whether to refine depth maps during processing. To make them metric"""
-    max_frames: int | None = None
-    """Maximum number of frames to process. If None, all frames are processed."""
-    tracking_start_ts_nano: int | None = None
-    """Optional nanosecond timestamp to start MANO tracking from; defaults to the calibration timestamp."""
-    tracking_max_frames: int | None = None
-    """Optional number of frames to run MANO tracking for; defaults to all remaining frames."""
-    mv_config: MultiViewHandTrackerConfig = field(default_factory=MultiViewHandTrackerConfig)
-    """Parameters forwarded to the multi-view tracker."""
-    output_dir: Path | None = None
-    """Output directory for colmap version. If None, results are not saved."""
-    hand_side: Literal["left", "right"] = "right"
-    """Which hand to run the MANO optimization for."""
-
-
 class ParsedInputs(NamedTuple):
     """NamedTuple containing parsed input data for calibration.
 
@@ -150,7 +119,7 @@ class ParsedInputs(NamedTuple):
 
 
 def parse_input(
-    input_type: Literal["videos", "images"], config: HandCalibConfig, parent_log_path: Path, timeline: str
+    input_type: Literal["videos", "images"], config: "HandCalibConfig", parent_log_path: Path, timeline: str
 ) -> ParsedInputs:
     """
     Parses input data based on the specified type, either images or videos, and returns a ParsedInputs NamedTuple.
@@ -246,6 +215,33 @@ def parse_input(
     return ParsedInputs(rgb_list=rgb_list, input_log_paths=input_log_paths, exo_ts=min_exo_ts)
 
 
+@dataclass
+class HandCalibConfig:
+    rr_config: RerunTyroConfig
+    image_dir: Path | None = None
+    """Directory containing input images."""
+    videos_dir: Path | None = None
+    """Directory containing input videos."""
+    ts_nano: int | None = None
+    """Optional absolute timestamp in nanoseconds for selecting a video frame (floored to the nearest prior frame)."""
+    max_frames: int | None = None
+    """Maximum number of frames to process. If None, all frames are processed."""
+    tracking_start_ts_nano: int | None = None
+    """Optional nanosecond timestamp to start MANO tracking from; defaults to the calibration timestamp."""
+    tracking_max_frames: int | None = None
+    """Optional number of frames to run MANO tracking for; defaults to all remaining frames."""
+    mv_hand_config: MultiViewHandTrackerConfig = field(default_factory=MultiViewHandTrackerConfig)
+    """Parameters forwarded to the multi-view hand tracker."""
+    calib_confg: MultiViewCalibratorConfig = field(default_factory=MultiViewCalibratorConfig)
+    """Parameters forwarded to the multi-view calibrator."""
+    output_dir: Path | None = None
+    """Output directory for colmap version. If None, results are not saved."""
+    hand_side: Literal["left", "right"] = "right"
+    """Which hand to run the MANO optimization for."""
+    stage: Literal["calib", "track", "all"] = "all"
+    """Which pipeline stage to run: calibration only, tracking only, or all stages."""
+
+
 def main(config: HandCalibConfig) -> None:
     parent_log_path = Path("world")
     timeline = "video_time"
@@ -280,13 +276,16 @@ def main(config: HandCalibConfig) -> None:
     ############################
     # 2. Calibrate Exo Cameras #
     ############################
+    if config.stage not in ("calib", "all"):
+        print("Skipping camera calibration as per configuration")
+        return
     for idx, rgb in enumerate(rgb_list):
         rr.log(
             f"{parent_log_path}/exo/camera_{idx}/pinhole/image",
             rr.Image(rgb, color_model=rr.ColorModel.RGB),
             static=True,
         )
-    mv_calibrator: MultiViewCalibrator = MultiViewCalibrator(refine_depth_maps=config.refine_depth_maps)
+    mv_calibrator: MultiViewCalibrator = MultiViewCalibrator(parent_log_path=parent_log_path, config=config.calib_confg)
     results: MVCalibResults = mv_calibrator(rgb_list=rgb_list)
 
     pinhole_param_list: list[PinholeParameters] = results.pinhole_param_list
@@ -310,6 +309,10 @@ def main(config: HandCalibConfig) -> None:
     ################################
     # 3. Calibrate Mano Parameters #
     ################################
+    if config.stage not in ("track", "all"):
+        print("Skipping hand calibration and tracking as per configuration")
+        print(f"Inference completed in {timer() - start:.2f} seconds")
+        return
     hand_detection_engine = HandDetector(HandDetectorConfig(verbose=False))
     hand_keypoint_engine = WilorHandKeypointDetector(HandKeypointDetectorConfig(verbose=False))
 
@@ -346,7 +349,7 @@ def main(config: HandCalibConfig) -> None:
         if hand_calib_result.mano is not None:
             beta: Float[ndarray, "10"] = hand_calib_result.mano.betas
 
-            tracker_config: MultiViewHandTrackerConfig = config.mv_config
+            tracker_config: MultiViewHandTrackerConfig = config.mv_hand_config
             mv_hand_tracker = MultiViewHandTracker(
                 config=tracker_config,
                 hand_detector=hand_detection_engine,

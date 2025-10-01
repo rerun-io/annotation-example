@@ -521,7 +521,7 @@ environments:
       - pypi: https://files.pythonhosted.org/packages/98/8e/f98332248aad102511bea4ae19c0ddacd2f0a994f3ca4c82b7a369e0af8b/mmengine-0.10.7-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/d7/96/bcb5141eae24474d80b8157b0c3055d25fa75f9804d4abb4a514695bbba9/moderngl-5.12.0-cp312-cp312-manylinux_2_17_x86_64.manylinux2014_x86_64.whl
       - pypi: git+https://github.com/microsoft/MoGe.git#0286b495230a074aadf1c76cc5c679e943e5d1c6
-      - pypi: git+https://github.com/pablovela5620/monoprior.git?rev=f6b54634189cf6f971593a47964c38494735f63f#f6b54634189cf6f971593a47964c38494735f63f
+      - pypi: git+https://github.com/pablovela5620/monoprior.git?rev=05f1e14acb5f4855d1cf18043d0f42f1c5a0d11f#05f1e14acb5f4855d1cf18043d0f42f1c5a0d11f
       - pypi: https://files.pythonhosted.org/packages/a4/8e/469e5a4a2f5855992e425f3cb33804cc07bf18d48f2db061aec61ce50270/more_itertools-10.8.0-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/43/e3/7d92a15f894aa0c9c4b49b8ee9ac9850d6e63b03c9c32c0367a13ae62209/mpmath-1.3.0-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/eb/8d/776adee7bbf76365fdd7f2552710282c79a4ead5d2a46408c9043a2b70ba/networkx-3.5-py3-none-any.whl
@@ -574,7 +574,7 @@ environments:
       - pypi: https://files.pythonhosted.org/packages/6a/23/8146aad7d88f4fcb3a6218f41a60f6c2d4e3a72de72da1825dc7c8f7877c/semantic_version-2.10.0-py2.py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/e0/f9/0595336914c5619e5f28a1fb793285925a8cd4b432c9da0a987836c7f822/shellingham-1.5.4-py2.py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/74/03/3271b7bb470fbab4adf5bd30b0d32143909d96f3608d815b447357f47f2b/shtab-1.7.2-py3-none-any.whl
-      - pypi: git+https://github.com/pablovela5620/simplecv.git?rev=846090ca64a2cbfef5be84109e43c5c774c46708#846090ca64a2cbfef5be84109e43c5c774c46708
+      - pypi: git+https://github.com/pablovela5620/simplecv.git?rev=3d6d6f0125b4c946a3f7b93b35933cc93c522048#3d6d6f0125b4c946a3f7b93b35933cc93c522048
       - pypi: https://files.pythonhosted.org/packages/e9/44/75a9c9421471a6c4805dbf2356f7c181a29c1879239abab1ea2cc8f38b40/sniffio-1.3.1-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/ce/fd/901cfa59aaa5b30a99e16876f11abe38b59a1a2c51ffb3d7142bb6089069/starlette-0.47.3-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/a2/09/77d55d46fd61b4a135c444fc97158ef34a095e5681d0a6c10b75bf356191/sympy-1.14.0-py3-none-any.whl
@@ -1130,7 +1130,7 @@ environments:
       - pypi: https://files.pythonhosted.org/packages/98/8e/f98332248aad102511bea4ae19c0ddacd2f0a994f3ca4c82b7a369e0af8b/mmengine-0.10.7-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/d7/96/bcb5141eae24474d80b8157b0c3055d25fa75f9804d4abb4a514695bbba9/moderngl-5.12.0-cp312-cp312-manylinux_2_17_x86_64.manylinux2014_x86_64.whl
       - pypi: git+https://github.com/microsoft/MoGe.git#0286b495230a074aadf1c76cc5c679e943e5d1c6
-      - pypi: git+https://github.com/pablovela5620/monoprior.git?rev=f6b54634189cf6f971593a47964c38494735f63f#f6b54634189cf6f971593a47964c38494735f63f
+      - pypi: git+https://github.com/pablovela5620/monoprior.git?rev=05f1e14acb5f4855d1cf18043d0f42f1c5a0d11f#05f1e14acb5f4855d1cf18043d0f42f1c5a0d11f
       - pypi: https://files.pythonhosted.org/packages/a4/8e/469e5a4a2f5855992e425f3cb33804cc07bf18d48f2db061aec61ce50270/more_itertools-10.8.0-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/43/e3/7d92a15f894aa0c9c4b49b8ee9ac9850d6e63b03c9c32c0367a13ae62209/mpmath-1.3.0-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/eb/8d/776adee7bbf76365fdd7f2552710282c79a4ead5d2a46408c9043a2b70ba/networkx-3.5-py3-none-any.whl
@@ -1182,7 +1182,7 @@ environments:
       - pypi: https://files.pythonhosted.org/packages/6a/23/8146aad7d88f4fcb3a6218f41a60f6c2d4e3a72de72da1825dc7c8f7877c/semantic_version-2.10.0-py2.py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/e0/f9/0595336914c5619e5f28a1fb793285925a8cd4b432c9da0a987836c7f822/shellingham-1.5.4-py2.py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/74/03/3271b7bb470fbab4adf5bd30b0d32143909d96f3608d815b447357f47f2b/shtab-1.7.2-py3-none-any.whl
-      - pypi: git+https://github.com/pablovela5620/simplecv.git?rev=846090ca64a2cbfef5be84109e43c5c774c46708#846090ca64a2cbfef5be84109e43c5c774c46708
+      - pypi: git+https://github.com/pablovela5620/simplecv.git?rev=3d6d6f0125b4c946a3f7b93b35933cc93c522048#3d6d6f0125b4c946a3f7b93b35933cc93c522048
       - pypi: https://files.pythonhosted.org/packages/e9/44/75a9c9421471a6c4805dbf2356f7c181a29c1879239abab1ea2cc8f38b40/sniffio-1.3.1-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/ce/fd/901cfa59aaa5b30a99e16876f11abe38b59a1a2c51ffb3d7142bb6089069/starlette-0.47.3-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/a2/09/77d55d46fd61b4a135c444fc97158ef34a095e5681d0a6c10b75bf356191/sympy-1.14.0-py3-none-any.whl
@@ -1398,7 +1398,7 @@ packages:
 - pypi: ./
   name: annotation-example
   version: 0.1.0
-  sha256: 145f3d5d225de8d62ae830a677f7180d01e66d39f99b9d1241acb302ee34cfcb
+  sha256: a7e4dc52e8475e8e9969c9a3ba147ae8b6471718571804c5338c9bf6742b6f1f
   requires_dist:
   - mmcv-lite>=2.2.0,<2.3
   - build>=1.2.2.post1,<2
@@ -6597,7 +6597,7 @@ packages:
   - gradio
   - utils3d @ git+https://github.com/EasternJournalist/utils3d.git@c5daf6f6c244d251f252102d09e9b7bcef791a38
   requires_python: '>=3.9'
-- pypi: git+https://github.com/pablovela5620/monoprior.git?rev=f6b54634189cf6f971593a47964c38494735f63f#f6b54634189cf6f971593a47964c38494735f63f
+- pypi: git+https://github.com/pablovela5620/monoprior.git?rev=05f1e14acb5f4855d1cf18043d0f42f1c5a0d11f#05f1e14acb5f4855d1cf18043d0f42f1c5a0d11f
   name: monopriors
   version: 0.3.2
   requires_dist:
@@ -6608,6 +6608,9 @@ packages:
   - transformers
   - diffusers[torch]>=0.32.2
   - timm>=1.0.15,<2
+  - gradio-rerun>=0.24.0,<0.25
+  - onnxruntime-gpu<1.23.0
+  - gradio==5.33.1
   requires_python: '>=3.11.0'
 - pypi: https://files.pythonhosted.org/packages/a4/8e/469e5a4a2f5855992e425f3cb33804cc07bf18d48f2db061aec61ce50270/more_itertools-10.8.0-py3-none-any.whl
   name: more-itertools
@@ -8446,7 +8449,7 @@ packages:
   - pytest-cov ; extra == 'dev'
   - pytest-timeout ; extra == 'dev'
   requires_python: '>=3.7'
-- pypi: git+https://github.com/pablovela5620/simplecv.git?rev=846090ca64a2cbfef5be84109e43c5c774c46708#846090ca64a2cbfef5be84109e43c5c774c46708
+- pypi: git+https://github.com/pablovela5620/simplecv.git?rev=3d6d6f0125b4c946a3f7b93b35933cc93c522048#3d6d6f0125b4c946a3f7b93b35933cc93c522048
   name: simplecv
   version: 0.6.0
   requires_dist:
