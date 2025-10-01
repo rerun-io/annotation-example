@@ -68,13 +68,13 @@ class MultiHandState:
 class MultiViewHandTrackerConfig:
     """Configuration for coordinating multi-view detections and keypoints."""
 
-    detection_confidence: float = 0.5
+    detection_confidence: float = 0.6
     """Confidence threshold for the hand detector."""
-    keypoint_confidence: float = 0.3
+    keypoint_confidence: float = 0.35
     """Minimum mean confidence for per-hand keypoints before zeroing detections."""
     verbose: bool = False
     """Whether to log verbose information."""
-    detection_by_tracking_enabled: bool = True
+    dbt: bool = False
     """Toggle detection-by-tracking extrapolation; fallback to raw detections when disabled."""
 
 
@@ -134,9 +134,7 @@ class MultiViewHandTracker:
         for hand_label in HAND_LABELS:
             mano_history: ManoHistory = getattr(hand_state, hand_label)
             use_tracking: bool = (
-                self.config.detection_by_tracking_enabled
-                and mano_history.t_mano is not None
-                and mano_history.t_minus_1_mano is not None
+                self.config.dbt and mano_history.t_mano is not None and mano_history.t_minus_1_mano is not None
             )
             if not use_tracking:
                 xyxy_batch: Float[ndarray, "n_views 1 4"] = self._detect_hands(
