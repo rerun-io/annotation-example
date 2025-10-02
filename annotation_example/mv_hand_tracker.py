@@ -70,14 +70,16 @@ class MultiHandState:
 class MultiViewHandTrackerConfig:
     """Configuration for coordinating multi-view detections and keypoints."""
 
-    detection_confidence: float = 0.6
+    detection_confidence: float = 0.4
     """Confidence threshold for the hand detector."""
-    keypoint_confidence: float = 0.35
+    keypoint_confidence: float = 0.25
     """Minimum mean confidence for per-hand keypoints before zeroing detections."""
     verbose: bool = False
     """Whether to log verbose information."""
     dbt: bool = False
     """Toggle detection-by-tracking extrapolation; fallback to raw detections when disabled."""
+    run_optim: bool = False
+    """Whether to run the MANO fitting optimization step."""
 
 
 class MultiViewHandTracker:
@@ -102,26 +104,27 @@ class MultiViewHandTracker:
             [pinhole.projection_matrix for pinhole in pinhole_param_list]
         )
 
-        self.left_mano_layer: ManoSimpleLayerNP = ManoSimpleLayerNP(side="left", mano_root=Path("data/"))
-        self.right_mano_layer: ManoSimpleLayerNP = ManoSimpleLayerNP(side="right", mano_root=Path("data/"))
+        if self.config.run_optim:
+            self.left_mano_layer: ManoSimpleLayerNP = ManoSimpleLayerNP(side="left", mano_root=Path("data/"))
+            self.right_mano_layer: ManoSimpleLayerNP = ManoSimpleLayerNP(side="right", mano_root=Path("data/"))
 
-        left_optim_cfg = PoseOptimConfig(
-            beta=self.betas,
-            Pall=self.Pall_exo,
-            hand_side="left",
-        )
-        right_optim_cfg = PoseOptimConfig(
-            beta=self.betas,
-            Pall=self.Pall_exo,
-            hand_side="right",
-        )
-        self.left_hand_optimizer: SingleHandOptim = SingleHandOptim(config=left_optim_cfg)
-        self.right_hand_optimizer: SingleHandOptim = SingleHandOptim(config=right_optim_cfg)
+            left_optim_cfg = PoseOptimConfig(
+                beta=self.betas,
+                Pall=self.Pall_exo,
+                hand_side="left",
+            )
+            right_optim_cfg = PoseOptimConfig(
+                beta=self.betas,
+                Pall=self.Pall_exo,
+                hand_side="right",
+            )
+            self.left_hand_optimizer: SingleHandOptim = SingleHandOptim(config=left_optim_cfg)
+            self.right_hand_optimizer: SingleHandOptim = SingleHandOptim(config=right_optim_cfg)
 
-        self.left_bbox_filter: OneEuroFilter | None = None
-        self.right_bbox_filter: OneEuroFilter | None = None
-        self.left_bbox_time: float = 0.0
-        self.right_bbox_time: float = 0.0
+            self.left_bbox_filter: OneEuroFilter | None = None
+            self.right_bbox_filter: OneEuroFilter | None = None
+            self.left_bbox_time: float = 0.0
+            self.right_bbox_time: float = 0.0
 
     def __call__(
         self,
@@ -188,6 +191,11 @@ class MultiViewHandTracker:
             # Fill in the triangulated keypoints into the full COCO set.
             fill_idx = RIGHT_HAND_IDX if hand_label == "right" else LEFT_HAND_IDX
             xyz_coco[0, fill_idx, :3] = np.nan if xyzc is None else xyzc[:, :3]
+
+            if not self.config.run_optim:
+                mano_history.t_mano = None
+                mano_history.t_minus_1_mano = None
+                continue
 
             mano_fit: ManoResults | None = self._fit_mano_model(
                 uvc_batch=uvc_batch,
