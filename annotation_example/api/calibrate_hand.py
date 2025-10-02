@@ -237,8 +237,8 @@ class HandCalibConfig:
     """Parameters forwarded to the multi-view calibrator."""
     output_dir: Path | None = None
     """Output directory for colmap version. If None, results are not saved."""
-    hand_side: Literal["left", "right"] = "right"
-    """Which hand to run the MANO optimization for."""
+    calib_hand_side: Literal["left", "right"] = "right"
+    """Hand side to optimize during MANO calibration; choose 'left' or 'right'."""
     stage: Literal["calib", "track", "all"] = "all"
     """Which pipeline stage to run: calibration only, tracking only, or all stages."""
 
@@ -325,7 +325,7 @@ def main(config: HandCalibConfig) -> None:
         hand_detector=hand_detection_engine,
         hand_keypoint_detector=hand_keypoint_engine,
         config=HandCalibratorConfig(
-            mano_optim_iters=30, ts_nano=config.ts_nano, hand_side=config.hand_side, verbose=False
+            mano_optim_iters=30, ts_nano=config.ts_nano, hand_side=config.calib_hand_side, verbose=False
         ),
     )
 

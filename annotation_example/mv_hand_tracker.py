@@ -138,7 +138,8 @@ class MultiViewHandTracker:
             np.nan,
             dtype=np.float32,
         )
-        for hand_label in HAND_LABELS:
+        for hand_label_literal in HAND_LABELS:
+            hand_label: HandLabel = hand_label_literal
             mano_history: ManoHistory = getattr(hand_state, hand_label)
             use_tracking: bool = (
                 self.config.dbt and mano_history.t_mano is not None and mano_history.t_minus_1_mano is not None
