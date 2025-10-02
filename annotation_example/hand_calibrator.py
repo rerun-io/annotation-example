@@ -102,7 +102,10 @@ def align_rotation(
     triangulated_basis: Float[ndarray, "3 5"] = compute_direction_matrix(triangulated_xyz_f64)
 
     # Keep only shared, finite basis vectors so the Procrustes fit uses comparable directions.
-    valid_mask: ndarray = (~np.isnan(mano_basis).any(axis=0)) & (~np.isnan(triangulated_basis).any(axis=0))
+    valid_mask: Bool[ndarray, "basis=5"] = np.asarray(
+        (~np.isnan(mano_basis).any(axis=0)) & (~np.isnan(triangulated_basis).any(axis=0)),
+        dtype=bool,
+    )
     valid_count: int = int(np.count_nonzero(valid_mask))
     if valid_count < 2:
         # Fewer than two directions leave the wrist frame under-constrained; return identity.
@@ -170,7 +173,7 @@ class HandCalibrationResult:
     """Triangulated 3D COCO-133 keypoints at the calibrated timestamp."""
     confidences: Float[ndarray, "n_kpts=133"]
     """Confidence score per COCO-133 keypoint derived from multi-view triangulation."""
-    mano: ManoOptimizationResult | None = None
+    mano: ManoOptimizationResult
     """MANO pose/shape parameters (and topology) when optimisation runs; ``None`` otherwise."""
 
 
@@ -210,33 +213,35 @@ class HandCalibrator:
         hand_detector: HandDetector,
         hand_keypoint_detector: WilorHandKeypointDetector,
         config: HandCalibratorConfig,
+        parent_log_path: Path,
     ) -> None:
         self.hand_detector: HandDetector = hand_detector
         self.hand_keypoint_detector: WilorHandKeypointDetector = hand_keypoint_detector
         self.config: HandCalibratorConfig = config
+        self.parent_log_path: Path = parent_log_path
 
     def __call__(
         self,
         *,
         exo_cam_list: list[PinholeParameters],
         rgb_ts_batch: UInt8[ndarray, "n_frames n_views H W 3"],
-        parent_log_path: Path,
         recording: rr.RecordingStream | None = None,
     ) -> HandCalibrationResult:
-        calibration_root: Path = parent_log_path / "hand_calibration"
+        calibration_root: Path = self.parent_log_path / "hand_calibration"
 
         rgb_list: UInt8[ndarray, "n_views H W 3"] = rgb_ts_batch[0]
 
         parsed_detections: DetectionResults = self._detect_keypoints(
             rgb_list=rgb_list,
             pinhole_param_list=exo_cam_list,
-            parent_log_path=parent_log_path,
+            recording=recording,
         )
 
         triangulation_result: TriangulationResult = self._triangulate_keypoints(
             parsed_detections.uvc_coco_batch,
             exo_cam_list,
             calibration_root=calibration_root,
+            recording=recording,
         )
         xyz: Float[ndarray, "n_kpts=133 3"] = triangulation_result.xyz
         conf_values: Float[ndarray, "n_kpts=133"] = triangulation_result.confidences
@@ -247,6 +252,7 @@ class HandCalibrator:
             parsed_detections=parsed_detections,
             pinhole_param_list=exo_cam_list,
             calibration_root=calibration_root,
+            recording=recording,
         )
 
         return HandCalibrationResult(
@@ -261,7 +267,7 @@ class HandCalibrator:
         *,
         rgb_list: UInt8[ndarray, "n_views H W 3"],
         pinhole_param_list: list[PinholeParameters],
-        parent_log_path: Path,
+        recording: rr.RecordingStream | None,
     ) -> DetectionResults:
         uvc_coco_list: list[Float[ndarray, "coco_kpts=133 3"]] = []
         right_hand_kpts: KeypointResults | None = None
@@ -273,7 +279,7 @@ class HandCalibrator:
                 hand_conf=self.config.detection_confidence,
             )
             camera_name: str = getattr(pinhole, "name", f"camera_{camera_idx}")
-            hand_path_root: Path = parent_log_path / "exo" / camera_name / "pinhole"
+            hand_path_root: Path = self.parent_log_path / "exo" / camera_name / "pinhole"
             uvc_coco: Float[ndarray, "coco_kpts=133 3"] = np.full((133, 3), np.nan, dtype=np.float32)
 
             for hand_label, xyxy in ("left", det_result.left_xyxy), ("right", det_result.right_xyxy):
@@ -316,6 +322,7 @@ class HandCalibrator:
                             class_ids=0 if hand_label == "left" else 1,
                             show_labels=True,
                         ),
+                        recording=recording,
                     )
                     rr.log(
                         f"{hand_log_path}/keypoints",
@@ -327,6 +334,7 @@ class HandCalibrator:
                             show_labels=False,
                             colors=conf_colors[0],
                         ),
+                        recording=recording,
                     )
 
             uvc_coco_list.append(uvc_coco)
@@ -344,6 +352,7 @@ class HandCalibrator:
         pinhole_param_list: list[PinholeParameters],
         *,
         calibration_root: Path,
+        recording: rr.RecordingStream | None,
     ) -> TriangulationResult:
         uvc_triangulate_batch: Float[ndarray, "n_views coco_kpts=133 3"] = np.nan_to_num(
             uvc_coco_batch.copy(),
@@ -359,27 +368,28 @@ class HandCalibrator:
         )
         xyz: Float[ndarray, "coco_kpts=133 3"] = xyzc[:, :3]
         conf_values: Float[ndarray, "coco_kpts=133"] = xyzc[:, 3]
-        xyz_for_logging: Float[ndarray, "coco_kpts=133 3"] = np.where(
-            conf_values[:, np.newaxis] > 0,
-            xyz,
-            np.nan,
-        )
-        conf_colors: UInt8[ndarray, "1 coco_kpts=133 3"] = confidence_scores_to_rgb(
-            conf_values[:, np.newaxis][np.newaxis, ...]
-        )
-
-        rr.log(
-            f"{calibration_root}/wb_keypoints",
-            Points3DWithConfidence(
-                positions=xyz_for_logging,
-                confidences=conf_values,
-                class_ids=2,
-                keypoint_ids=COCO_133_IDS,
-                show_labels=False,
-                colors=conf_colors[0],
-            ),
-        )
-        triangulation_result = TriangulationResult(
+        if self.config.verbose:
+            xyz_for_logging: Float[ndarray, "coco_kpts=133 3"] = np.where(
+                conf_values[:, np.newaxis] > 0,
+                xyz,
+                np.nan,
+            )
+            conf_colors: UInt8[ndarray, "1 coco_kpts=133 3"] = confidence_scores_to_rgb(
+                conf_values[:, np.newaxis][np.newaxis, ...]
+            )
+            rr.log(
+                f"{calibration_root}/wb_keypoints",
+                Points3DWithConfidence(
+                    positions=xyz_for_logging,
+                    confidences=conf_values,
+                    class_ids=2,
+                    keypoint_ids=COCO_133_IDS,
+                    show_labels=False,
+                    colors=conf_colors[0],
+                ),
+                recording=recording,
+            )
+        triangulation_result: TriangulationResult = TriangulationResult(
             xyz=xyz,
             confidences=conf_values,
         )
@@ -393,6 +403,7 @@ class HandCalibrator:
         parsed_detections: DetectionResults,
         pinhole_param_list: list[PinholeParameters],
         calibration_root: Path,
+        recording: rr.RecordingStream | None,
     ) -> ManoOptimizationResult:
         hand_side: Literal["left", "right"] = self.config.hand_side
         uv_exo_stack: Float[ndarray, "n_frames=1 n_views n_kpts=133 2"] = parsed_detections.uvc_coco_batch[
@@ -467,7 +478,10 @@ class HandCalibrator:
             (joints_naive[0] - joints_naive[0, 0]) @ rotation_matrix_debug.T
         ) + joints_naive[0, 0]
 
-        valid_indices_debug: np.ndarray = np.isfinite(hand_xyz_masked).all(axis=1)
+        valid_indices_debug: Bool[ndarray, "n_hand"] = np.asarray(
+            np.isfinite(hand_xyz_masked).all(axis=1),
+            dtype=bool,
+        )
         if np.any(valid_indices_debug):
             translation_offset: Float32[ndarray, "3"] = (
                 np.nanmean(hand_xyz_masked[valid_indices_debug] - rotated_joints_debug[valid_indices_debug], axis=0)
@@ -585,6 +599,7 @@ class HandCalibrator:
                     vertex_normals=normals_naive[0],
                     albedo_factor=(255, 64, 0, 255),
                 ),
+                recording=recording,
             )
             rr.log(
                 f"{mano_mesh_path}_aligned",
@@ -594,26 +609,8 @@ class HandCalibrator:
                     vertex_normals=normals_aligned[0],
                     albedo_factor=(0, 255, 0, 255),
                 ),
+                recording=recording,
             )
-        rr.log(
-            f"{mano_mesh_path}_optim",
-            rr.Mesh3D(
-                vertex_positions=verts_aligned_optim,
-                triangle_indices=faces_np,
-                vertex_normals=normals_optim[0],
-                albedo_factor=(0, 0, 255, 255),
-            ),
-        )
-        rr.log(
-            f"{mano_joint_path}",
-            rr.Points3D(
-                joints_aligned_optim,
-                class_ids=class_ids,
-                keypoint_ids=keypoint_ids,
-                show_labels=False,
-            ),
-        )
-        if self.config.verbose:
             rr.log(
                 f"{mano_joint_path}_init",
                 rr.Points3D(
@@ -622,6 +619,7 @@ class HandCalibrator:
                     keypoint_ids=keypoint_ids,
                     show_labels=False,
                 ),
+                recording=recording,
             )
             rr.log(
                 f"{mano_joint_path}_aligned",
@@ -631,6 +629,7 @@ class HandCalibrator:
                     keypoint_ids=keypoint_ids,
                     show_labels=False,
                 ),
+                recording=recording,
             )
 
         mano_result = ManoOptimizationResult(
