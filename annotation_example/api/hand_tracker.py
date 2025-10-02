@@ -13,6 +13,7 @@ from simplecv.apis.view_exoego import (
     SceneSetupResult,
     compute_vertex_normals_batch,
     create_blueprint,
+    filter_out_of_bounds_keypoints,
     log_exoego_batch,
     setup_scene,
 )
@@ -26,6 +27,8 @@ from simplecv.data.skeleton.coco_133 import (
     COCO_133_LINKS,
 )
 from simplecv.data.skeleton.mediapipe import MEDIAPIPE_ID2NAME, MEDIAPIPE_IDS, MEDIAPIPE_LINKS
+from simplecv.ops.mano.mano_np import ManoSimpleLayerNP
+from simplecv.ops.triangulate import proj_3d_vectorized
 from simplecv.rerun_custom_types import Points2DWithConfidence, Points3DWithConfidence, confidence_scores_to_rgb
 from simplecv.rerun_log_utils import (
     RerunTyroConfig,
@@ -92,11 +95,14 @@ def log_mano_outputs(
     recording: rr.RecordingStream | None = None,
 ) -> None:
     """Log optimized MANO meshes together with 3D keypoints and per-view projections."""
-    # log the triangulated coco 133 keypoints if available
-    if np.any(np.isfinite(hand_state.xyz_coco)):
+    ##############################
+    # 1. Log COCO Triangulation #
+    ##############################
+    has_coco_keypoints: bool = bool(np.any(np.isfinite(hand_state.xyz_coco)))
+    if has_coco_keypoints:
         conf_colors_3d: UInt8[ndarray, "1 133 3"] = confidence_scores_to_rgb(np.ones((1, 133, 1), dtype=np.float32))
         rr.log(
-            str(parent_log_path / "mano_fits/coco_133/keypoints_3d"),
+            str(parent_log_path / "gt/coco_133"),
             Points3DWithConfidence(
                 positions=hand_state.xyz_coco[0],
                 confidences=np.ones((133,), dtype=np.float32),
@@ -107,14 +113,151 @@ def log_mano_outputs(
             ),
             recording=recording,
         )
+    else:
+        rr.log(
+            str(parent_log_path / "gt/coco_133"),
+            rr.Clear(recursive=True),
+            recording=recording,
+        )
 
+    ###############################
+    # 2. Project COCO Keypoints   #
+    ###############################
+    Pall_views: Float32[ndarray, "n_views 3 4"] = np.stack(
+        [pinhole_param.projection_matrix for pinhole_param in pinhole_param_list],
+        axis=0,
+    ).astype(np.float32, copy=False)
+
+    if has_coco_keypoints:
+        coco_xyz_world: Float32[ndarray, "n_coco=133 3"] = hand_state.xyz_coco[0].astype(np.float32, copy=False)
+        coco_xyz_hom: Float32[ndarray, "n_coco=133 4"] = np.concatenate(
+            [coco_xyz_world, np.ones((coco_xyz_world.shape[0], 1), dtype=np.float32)],
+            axis=1,
+        )
+        coco_xyz_hom_batch: Float32[ndarray, "1 n_coco=133 4"] = coco_xyz_hom[np.newaxis, :, :]
+        coco_uv_batch: Float32[ndarray, "1 n_views n_coco=133 2"] = proj_3d_vectorized(
+            xyz_hom=coco_xyz_hom_batch,
+            P=Pall_views,
+        ).astype(np.float32, copy=False)
+        # Keep the homogeneous projection so we retain per-view depth information.
+        coco_uv_hom_batch: Float32[ndarray, "n_views 3 n_coco=133"] = (Pall_views @ coco_xyz_hom.T).astype(
+            np.float32, copy=False
+        )
+        coco_depth_batch: Float32[ndarray, "n_views n_coco=133"] = coco_uv_hom_batch[:, 2, :]
+
+        for view_idx, pinhole_param in enumerate(pinhole_param_list):
+            camera_name: str = getattr(pinhole_param, "name", f"camera_{view_idx}")
+            pinhole_log_path: Path = parent_log_path / "exo" / camera_name / "pinhole"
+            coco_video_path: Path = pinhole_log_path / "video" / "coco_133"
+            coco_uv_view: Float32[ndarray, "n_coco=133 2"] = coco_uv_batch[0, view_idx].astype(
+                np.float32,
+                copy=False,
+            )
+            coco_depth_view: Float32[ndarray, "n_coco=133"] = coco_depth_batch[view_idx]
+            # Positive depth identifies points that lie in front of the camera.
+            coco_depth_mask: Bool[ndarray, "n_coco=133"] = np.asarray(coco_depth_view > 0.0, dtype=np.bool)
+            coco_uv_masked: Float32[ndarray, "n_coco=133 2"] = np.where(
+                coco_depth_mask[:, np.newaxis],
+                coco_uv_view,
+                np.float32(np.nan),
+            )
+            # Clamp the UV extent while preserving NaNs for depth-filtered samples.
+            coco_uv_filtered: Float32[ndarray, "n_coco=133 2"] = filter_out_of_bounds_keypoints(
+                uv_stack=coco_uv_masked,
+                camera_params=pinhole_param,
+            )
+            coco_uv_projected: Float32[ndarray, "n_coco=133 2"] = coco_uv_filtered.astype(np.float32, copy=False)
+            coco_finite_mask: Bool[ndarray, "n_coco=133"] = (
+                np.isfinite(coco_uv_projected[:, 0]) & np.isfinite(coco_uv_projected[:, 1]) & coco_depth_mask
+            )
+            coco_confidences_2d: Float32[ndarray, "n_coco=133"] = coco_depth_mask.astype(np.float32)
+            coco_confidences_2d[~coco_finite_mask] = 0.0
+            has_valid_coco_uv: bool = bool(np.any(coco_finite_mask))
+            if has_valid_coco_uv:
+                coco_conf_colors_2d: UInt8[ndarray, "1 n_coco=133 3"] = confidence_scores_to_rgb(
+                    coco_confidences_2d[np.newaxis, :, np.newaxis]
+                )
+
+                rr.log(
+                    f"{coco_video_path}/coco_keypoints",
+                    Points2DWithConfidence(
+                        positions=coco_uv_projected,
+                        confidences=coco_confidences_2d,
+                        class_ids=2,
+                        keypoint_ids=list(COCO_133_ID2NAME.keys()),
+                        show_labels=False,
+                        colors=coco_conf_colors_2d[0],
+                    ),
+                    recording=recording,
+                )
+            else:
+                rr.log(
+                    f"{coco_video_path}/coco_keypoints",
+                    rr.Clear(recursive=True),
+                    recording=recording,
+                )
+    else:
+        for view_idx, pinhole_param in enumerate(pinhole_param_list):
+            camera_name: str = getattr(pinhole_param, "name", f"camera_{view_idx}")
+            pinhole_log_path: Path = parent_log_path / "exo" / camera_name / "pinhole"
+            coco_video_path: Path = pinhole_log_path / "video" / "coco_133"
+            rr.log(
+                f"{coco_video_path}/coco_keypoints",
+                rr.Clear(recursive=True),
+                recording=recording,
+            )
+
+    #############################################
+    # 3. Render MANO Meshes And Projections     #
+    #############################################
     for hand_label in HAND_LABELS:
         mano_history: ManoHistory = getattr(hand_state, hand_label)
         mano_result: ManoResults | None = mano_history.t_mano
+        mano_base_path: Path = parent_log_path / "gt" / f"{hand_label}_mano"
+        mano_mesh_path: Path = mano_base_path / "mesh"
         if mano_result is None:
+            rr.log(
+                str(mano_mesh_path),
+                rr.Clear(recursive=True),
+                recording=recording,
+            )
+            rr.log(
+                str(mano_base_path / "global_orient"),
+                rr.Clear(recursive=True),
+                recording=recording,
+            )
+            rr.log(
+                str(mano_base_path / "hand_pose"),
+                rr.Clear(recursive=True),
+                recording=recording,
+            )
+            rr.log(
+                str(mano_base_path / "betas"),
+                rr.Clear(recursive=True),
+                recording=recording,
+            )
+            rr.log(
+                str(mano_base_path / "translation"),
+                rr.Clear(recursive=True),
+                recording=recording,
+            )
+            for view_idx, pinhole_param in enumerate(pinhole_param_list):
+                camera_name: str = getattr(pinhole_param, "name", f"camera_{view_idx}")
+                pinhole_log_path: Path = parent_log_path / "exo" / camera_name / "pinhole"
+                hand_video_path: Path = pinhole_log_path / "video" / hand_label
+                rr.log(
+                    f"{hand_video_path}/mano_keypoints",
+                    rr.Clear(recursive=True),
+                    recording=recording,
+                )
+                rr.log(
+                    f"{pinhole_log_path}/{hand_label}_mano_bbox",
+                    rr.Clear(recursive=True),
+                    recording=recording,
+                )
             continue
 
-        mano_layer = tracker.left_mano_layer if hand_label == "left" else tracker.right_mano_layer
+        mano_layer: ManoSimpleLayerNP = tracker.left_mano_layer if hand_label == "left" else tracker.right_mano_layer
         class_id: int = 0 if hand_label == "left" else 1
         global_orient: Float32[ndarray, "3"] = mano_result.global_orient.astype(np.float32, copy=False)
         hand_pose: Float32[ndarray, "45"] = mano_result.hand_pose.astype(np.float32, copy=False)
@@ -149,7 +292,6 @@ def log_mano_outputs(
             faces_np,
         ).astype(np.float32, copy=False)
         normals: Float32[ndarray, "n_verts=778 3"] = normals_batch[0]
-        mano_mesh_path: Path = parent_log_path / "mano_fits" / hand_label
         rr.log(
             str(mano_mesh_path),
             rr.Mesh3D(
@@ -160,80 +302,108 @@ def log_mano_outputs(
             ),
             recording=recording,
         )
+        rr.log(
+            str(mano_base_path / "global_orient"),
+            rr.Tensor(global_orient),
+            recording=recording,
+        )
+        rr.log(
+            str(mano_base_path / "hand_pose"),
+            rr.Tensor(hand_pose),
+            recording=recording,
+        )
+        rr.log(
+            str(mano_base_path / "betas"),
+            rr.Tensor(betas_single),
+            recording=recording,
+        )
+        rr.log(
+            str(mano_base_path / "translation"),
+            rr.Tensor(translation_single),
+            recording=recording,
+        )
 
         confidences_3d: Float32[ndarray, "mp_kpts=21"] = np.ones((joints_m.shape[0],), dtype=np.float32)
         conf_colors_3d: UInt8[ndarray, "1 mp_kpts=21 3"] = confidence_scores_to_rgb(
             confidences_3d[np.newaxis, :, np.newaxis]
         )
-        rr.log(
-            f"{mano_mesh_path}/keypoints_3d",
-            Points3DWithConfidence(
-                positions=joints_m,
-                confidences=confidences_3d,
-                class_ids=class_id,
-                keypoint_ids=MEDIAPIPE_IDS,
-                show_labels=False,
-                colors=conf_colors_3d[0],
-            ),
-            recording=recording,
-        )
+        # rr.log(
+        #     f"{mano_mesh_path}/keypoints_3d",
+        #     Points3DWithConfidence(
+        #         positions=joints_m,
+        #         confidences=confidences_3d,
+        #         class_ids=class_id,
+        #         keypoint_ids=MEDIAPIPE_IDS,
+        #         show_labels=False,
+        #         colors=conf_colors_3d[0],
+        #     ),
+        #     recording=recording,
+        # )
 
-        ones_column: Float32[ndarray, "mp_kpts=21 1"] = np.ones((joints_m.shape[0], 1), dtype=np.float32)
-        world_keypoints_h: Float32[ndarray, "mp_kpts=21 4"] = np.concatenate(
-            [joints_m, ones_column],
+        mano_xyz_world: Float32[ndarray, "mp_kpts=21 3"] = joints_m
+        mano_ones_column: Float32[ndarray, "mp_kpts=21 1"] = np.ones((mano_xyz_world.shape[0], 1), dtype=np.float32)
+        mano_xyz_hom: Float32[ndarray, "mp_kpts=21 4"] = np.concatenate(
+            [mano_xyz_world, mano_ones_column],
             axis=1,
         )
+
+        mano_xyz_hom_batch: Float32[ndarray, "1 mp_kpts=21 4"] = mano_xyz_hom[np.newaxis, :, :]
+        mano_uv_batch: Float32[ndarray, "1 n_views mp_kpts=21 2"] = proj_3d_vectorized(
+            xyz_hom=mano_xyz_hom_batch,
+            P=Pall_views,
+        ).astype(np.float32, copy=False)
+        mano_uv_hom_batch: Float32[ndarray, "n_views 3 mp_kpts=21"] = (Pall_views @ mano_xyz_hom.T).astype(
+            np.float32, copy=False
+        )
+        mano_depth_batch: Float32[ndarray, "n_views mp_kpts=21"] = mano_uv_hom_batch[:, 2, :]
 
         for view_idx, pinhole_param in enumerate(pinhole_param_list):
             camera_name: str = getattr(pinhole_param, "name", f"camera_{view_idx}")
             pinhole_log_path: Path = parent_log_path / "exo" / camera_name / "pinhole"
             hand_video_path: Path = pinhole_log_path / "video" / hand_label
-            projection_matrix: Float32[ndarray, "3 4"] = pinhole_param.projection_matrix.astype(
+            mano_uv_view: Float32[ndarray, "mp_kpts=21 2"] = mano_uv_batch[0, view_idx].astype(
                 np.float32,
                 copy=False,
             )
-            pixel_h: Float32[ndarray, "mp_kpts=21 3"] = (projection_matrix @ world_keypoints_h.T).T.astype(
-                np.float32,
-                copy=False,
+            mano_depth_view: Float32[ndarray, "mp_kpts=21"] = mano_depth_batch[view_idx]
+            mano_depth_mask: Bool[ndarray, "mp_kpts=21"] = np.asarray(mano_depth_view > 0.0, dtype=np.bool)
+            mano_uv_masked: Float32[ndarray, "mp_kpts=21 2"] = np.where(
+                mano_depth_mask[:, np.newaxis],
+                mano_uv_view,
+                np.float32(np.nan),
             )
-            depths: Float32[ndarray, "mp_kpts=21"] = pixel_h[:, 2]
-            positive_depth_mask: Bool[ndarray, "mp_kpts=21"] = depths > 0.0
-            uv: Float32[ndarray, "mp_kpts=21 2"] = np.full((world_keypoints_h.shape[0], 2), np.nan, dtype=np.float32)
-            np.divide(
-                pixel_h[:, :2],
-                depths[:, np.newaxis],
-                out=uv,
-                where=positive_depth_mask[:, np.newaxis],
+            mano_uv_filtered: Float32[ndarray, "mp_kpts=21 2"] = filter_out_of_bounds_keypoints(
+                uv_stack=mano_uv_masked,
+                camera_params=pinhole_param,
             )
-            finite_uv_mask: Bool[ndarray, "mp_kpts=21"] = (
-                np.isfinite(uv[:, 0]) & np.isfinite(uv[:, 1]) & positive_depth_mask
+            mano_uv_projected: Float32[ndarray, "mp_kpts=21 2"] = mano_uv_filtered.astype(np.float32, copy=False)
+            mano_finite_mask: Bool[ndarray, "mp_kpts=21"] = (
+                np.isfinite(mano_uv_projected[:, 0]) & np.isfinite(mano_uv_projected[:, 1]) & mano_depth_mask
             )
-            confidences_2d: Float32[ndarray, "mp_kpts=21"] = positive_depth_mask.astype(np.float32)
-            confidences_2d[~finite_uv_mask] = 0.0
-            conf_colors_2d: UInt8[ndarray, "1 mp_kpts=21 3"] = confidence_scores_to_rgb(
-                confidences_2d[np.newaxis, :, np.newaxis]
-            )
+            mano_confidences_2d: Float32[ndarray, "mp_kpts=21"] = mano_depth_mask.astype(np.float32)
+            mano_confidences_2d[~mano_finite_mask] = 0.0
+            has_valid_mano_uv: bool = bool(np.any(mano_finite_mask))
+            if has_valid_mano_uv:
+                mano_conf_colors_2d: UInt8[ndarray, "1 mp_kpts=21 3"] = confidence_scores_to_rgb(
+                    mano_confidences_2d[np.newaxis, :, np.newaxis]
+                )
 
-            rr.log(
-                f"{hand_video_path}/mano_keypoints",
-                Points2DWithConfidence(
-                    positions=uv,
-                    confidences=confidences_2d,
-                    class_ids=class_id,
-                    keypoint_ids=MEDIAPIPE_IDS,
-                    show_labels=False,
-                    colors=conf_colors_2d[0],
-                ),
-                recording=recording,
-            )
+                rr.log(
+                    f"{hand_video_path}/mano_keypoints",
+                    Points2DWithConfidence(
+                        positions=mano_uv_projected,
+                        confidences=mano_confidences_2d,
+                        class_ids=class_id,
+                        keypoint_ids=MEDIAPIPE_IDS,
+                        show_labels=False,
+                        colors=mano_conf_colors_2d[0],
+                    ),
+                    recording=recording,
+                )
 
-            xyxy_view: Float32[ndarray, "1 4"]
-            if not np.any(finite_uv_mask):
-                xyxy_view = np.full((1, 4), np.nan, dtype=np.float32)
-            else:
-                valid_uv: Float32[ndarray, "m 2"] = uv[finite_uv_mask]
-                min_xy: Float32[ndarray, "2"] = valid_uv.min(axis=0).astype(np.float32, copy=False)
-                max_xy: Float32[ndarray, "2"] = valid_uv.max(axis=0).astype(np.float32, copy=False)
+                mano_uv_valid: Float32[ndarray, "m 2"] = mano_uv_projected[mano_finite_mask]
+                min_xy: Float32[ndarray, "2"] = mano_uv_valid.min(axis=0).astype(np.float32, copy=False)
+                max_xy: Float32[ndarray, "2"] = mano_uv_valid.max(axis=0).astype(np.float32, copy=False)
                 width: float = float(max_xy[0] - min_xy[0])
                 height: float = float(max_xy[1] - min_xy[1])
                 side_length: float = max(width, height, 1.0)
@@ -263,17 +433,28 @@ def log_mano_outputs(
                 if y1 > y2:
                     y1, y2 = y2, y1
 
-                xyxy_view = np.array([[x1, y1, x2, y2]], dtype=np.float32)
+                xyxy_view: Float32[ndarray, "1 4"] = np.array([[x1, y1, x2, y2]], dtype=np.float32)
 
-            rr.log(
-                f"{pinhole_log_path}/{hand_label}_mano_bbox",
-                rr.Boxes2D(
-                    array=xyxy_view,
-                    array_format=rr.Box2DFormat.XYXY,
-                    class_ids=class_id,
-                ),
-                recording=recording,
-            )
+                rr.log(
+                    f"{pinhole_log_path}/{hand_label}_mano_bbox",
+                    rr.Boxes2D(
+                        array=xyxy_view,
+                        array_format=rr.Box2DFormat.XYXY,
+                        class_ids=class_id,
+                    ),
+                    recording=recording,
+                )
+            else:
+                rr.log(
+                    f"{hand_video_path}/mano_keypoints",
+                    rr.Clear(recursive=True),
+                    recording=recording,
+                )
+                rr.log(
+                    f"{pinhole_log_path}/{hand_label}_mano_bbox",
+                    rr.Clear(recursive=True),
+                    recording=recording,
+                )
 
 
 @dataclass
@@ -329,7 +510,7 @@ def main(config: HandTrackingConfig) -> None:
 
     try:
         hocap_labels: HocapSequence = exoego_sequence.labels  # type: ignore[assignment]
-        betas: Float32[ndarray, "10"] = hocap_labels.mano_stack.betas.astype(np.float32, copy=False)
+        betas: Float32[ndarray, "10"] = hocap_labels.mano_stack.betas.astype(np.float32, copy=False)  # type: ignore[assignment]
     except Exception as e:
         betas: Float32[ndarray, "10"] = np.zeros((10,), dtype=np.float32)
     mv_hand_tracker = MultiViewHandTracker(
