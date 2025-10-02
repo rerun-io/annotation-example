@@ -1,7 +1,8 @@
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
 from timeit import default_timer as timer
-from typing import Literal, NamedTuple
+from typing import Literal, NamedTuple, cast
 
 import cv2
 import numpy as np
@@ -167,28 +168,43 @@ def parse_input(
     """
     exo_ts_list: list[Int[ndarray, "num_frames"]] | None = None
     mv_reader: MultiVideoReader | None = None
-    bgr_list: list[UInt8[ndarray, "H W 3"]]
+    bgr_list: list[UInt8[ndarray, "H W 3"]] | None = None
     match input_type:
         case "images":
-            image_paths = []
+            if config.image_dir is None:
+                raise ValueError("Image input requested but 'image_dir' is not provided")
+            image_dir: Path = config.image_dir
+            image_paths: list[Path] = []
 
             for ext in SUPPORTED_IMAGE_EXTENSIONS:
-                image_paths.extend(config.image_dir.glob(f"*{ext}"))
-            image_paths: list[Path] = natsorted(image_paths)
+                image_paths.extend(image_dir.glob(f"*{ext}"))
+            image_paths = natsorted(image_paths)
             assert len(image_paths) > 0, (
                 f"No images found in {config.image_dir} in supported formats {SUPPORTED_IMAGE_EXTENSIONS}"
             )
 
-            bgr_list: list[UInt8[ndarray, "H W 3"]] = [cv2.imread(str(image_path)) for image_path in image_paths]
+            bgr_list_images: list[UInt8[ndarray, "H W 3"]] = []
+            for image_path in image_paths:
+                bgr_image = cv2.imread(str(image_path))
+                if bgr_image is None:
+                    msg = f"Failed to read image '{image_path}'"
+                    raise FileNotFoundError(msg)
+                bgr_array_np: UInt8[ndarray, "H W 3"] = np.asarray(bgr_image, dtype=np.uint8)
+                bgr_array: UInt8[ndarray, "H W 3"] = bgr_array_np
+                bgr_list_images.append(bgr_array)
+            bgr_list = bgr_list_images
             input_log_paths: list[Path] = [
                 parent_log_path / "exo" / f"camera_{i}" / "pinhole" / "image" for i in range(len(bgr_list))
             ]
         case "videos":
-            video_path_list: list[Path] = natsorted(config.videos_dir.glob("*.mp4"))
+            if config.videos_dir is None:
+                raise ValueError("Video input requested but 'videos_dir' is not provided")
+            video_dir: Path = config.videos_dir
+            video_path_list: list[Path] = natsorted(video_dir.glob("*.mp4"))
             input_log_paths: list[Path] = [
                 parent_log_path / "exo" / f"camera_{i}" / "pinhole" / "video" for i in range(len(video_path_list))
             ]
-            exo_ts_list: list[Int[ndarray, "num_frames"]] = []
+            exo_ts_entries: list[Int[ndarray, "num_frames"]] = []
             assert len(video_path_list) > 0, f"No videos found in {config.videos_dir}"
             for i, video_path in enumerate(video_path_list):
                 exo_ts: Int[ndarray, "num_frames"] = log_video(
@@ -196,11 +212,16 @@ def parse_input(
                     video_log_path=input_log_paths[i],
                     timeline=timeline,
                 )
-                exo_ts_list.append(exo_ts)
+                exo_ts_entries.append(exo_ts)
 
             mv_reader = MultiVideoReader(video_path_list)
+            exo_ts_list = exo_ts_entries
 
-    min_exo_ts: Int[ndarray, "num_frames"] | None = min(exo_ts_list, key=len) if input_type == "videos" else None
+    min_exo_ts: Int[ndarray, "num_frames"] | None
+    if exo_ts_list is not None and len(exo_ts_list) > 0:
+        min_exo_ts = min(exo_ts_list, key=lambda arr: int(arr.shape[0]))
+    else:
+        min_exo_ts = None
 
     if input_type == "videos":
         assert mv_reader is not None, "MultiVideoReader must be initialized for video inputs"
@@ -210,9 +231,23 @@ def parse_input(
             frame_index: int = timestamp_to_frame_index(time_ns=ts_nanos, frame_timestamps_ns=min_exo_ts)
         else:
             frame_index = 0
-        bgr_list = mv_reader[frame_index]
+        bgr_frames: list[np.ndarray] = mv_reader[frame_index]
+        bgr_frames_list: list[UInt8[ndarray, "H W 3"]] = []
+        for frame in bgr_frames:
+            bgr_frame_np: UInt8[ndarray, "H W 3"] = np.asarray(frame, dtype=np.uint8)
+            bgr_frame: UInt8[ndarray, "H W 3"] = bgr_frame_np
+            bgr_frames_list.append(bgr_frame)
+        bgr_list = bgr_frames_list
 
-    rgb_list: list[UInt8[ndarray, "H W 3"]] = [cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB) for bgr in bgr_list]
+    if bgr_list is None:
+        raise RuntimeError("Failed to load any input frames")
+
+    rgb_list_converted: list[UInt8[ndarray, "H W 3"]] = []
+    for bgr in bgr_list:
+        rgb_np: UInt8[ndarray, "H W 3"] = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
+        rgb: UInt8[ndarray, "H W 3"] = rgb_np
+        rgb_list_converted.append(rgb)
+    rgb_list: list[UInt8[ndarray, "H W 3"]] = rgb_list_converted
     return ParsedInputs(rgb_list=rgb_list, input_log_paths=input_log_paths, exo_ts=min_exo_ts)
 
 
@@ -235,8 +270,8 @@ class HandCalibConfig:
     """Parameters forwarded to the multi-view hand tracker."""
     calib_confg: MultiViewCalibratorConfig = field(default_factory=MultiViewCalibratorConfig)
     """Parameters forwarded to the multi-view calibrator."""
-    output_dir: Path | None = None
-    """Output directory for colmap version. If None, results are not saved."""
+    do_hand_calib: bool = True
+    """Whether to perform hand calibration."""
     calib_hand_side: Literal["left", "right"] = "right"
     """Hand side to optimize during MANO calibration; choose 'left' or 'right'."""
     stage: Literal["calib", "track", "all"] = "all"
@@ -321,14 +356,19 @@ def main(config: HandCalibConfig) -> None:
     hand_detection_engine = HandDetector(HandDetectorConfig(verbose=False))
     hand_keypoint_engine = WilorHandKeypointDetector(HandKeypointDetectorConfig(verbose=False))
 
-    hand_calibrator = HandCalibrator(
-        hand_detector=hand_detection_engine,
-        hand_keypoint_detector=hand_keypoint_engine,
-        config=HandCalibratorConfig(
-            mano_optim_iters=30, ts_nano=config.ts_nano, hand_side=config.calib_hand_side, verbose=False
-        ),
-    )
+    if config.do_hand_calib:
+        hand_calibrator = HandCalibrator(
+            hand_detector=hand_detection_engine,
+            hand_keypoint_detector=hand_keypoint_engine,
+            config=HandCalibratorConfig(
+                mano_optim_iters=30, ts_nano=config.ts_nano, hand_side=config.calib_hand_side, verbose=False
+            ),
+            parent_log_path=parent_log_path,
+        )
 
+    #######################################
+    # 4. Prepare Tracking Data Sources    #
+    #######################################
     if config.videos_dir is not None and exo_ts is not None:
         video_path_list: list[Path] = natsorted(config.videos_dir.glob("*.mp4"))
         mv_reader = MultiVideoReader(video_path_list)
@@ -345,68 +385,77 @@ def main(config: HandCalibConfig) -> None:
             ts_nanos=target_ts_nano,
             frame_timestamps_ns=exo_ts,
         )
-
-        hand_calib_result: HandCalibrationResult = hand_calibrator(
-            exo_cam_list=pinhole_param_list,
-            rgb_ts_batch=rgb_ts_batch,
-            parent_log_path=parent_log_path,
-        )
-        if hand_calib_result.mano is not None:
+        if config.do_hand_calib:
+            hand_calib_result: HandCalibrationResult = hand_calibrator(
+                exo_cam_list=pinhole_param_list,
+                rgb_ts_batch=rgb_ts_batch,
+                recording=config.rr_config.rec_stream,
+            )
             beta: Float[ndarray, "10"] = hand_calib_result.mano.betas
 
-            tracker_config: MultiViewHandTrackerConfig = config.mv_hand_config
-            mv_hand_tracker = MultiViewHandTracker(
-                config=tracker_config,
-                hand_detector=hand_detection_engine,
-                hand_keypoint_detector=hand_keypoint_engine,
-                betas=beta,
+        else:
+            beta: Float[ndarray, "10"] = np.zeros((10,), dtype=np.float32)
+
+        tracker_config: MultiViewHandTrackerConfig = config.mv_hand_config
+        mv_hand_tracker = MultiViewHandTracker(
+            config=tracker_config,
+            hand_detector=hand_detection_engine,
+            hand_keypoint_detector=hand_keypoint_engine,
+            betas=beta,
+            pinhole_param_list=pinhole_param_list,
+            parent_log_path=parent_log_path,
+        )
+
+        tracking_reader: MultiVideoReader = MultiVideoReader(video_path_list)
+        hand_state: MultiHandState = MultiHandState()
+
+        total_frames: int = int(exo_ts.shape[0])
+        tracking_start_ts: int = (
+            config.tracking_start_ts_nano
+            if config.tracking_start_ts_nano is not None
+            else (config.ts_nano if config.ts_nano is not None else int(exo_ts[0]))
+        )
+        start_index: int = timestamp_to_frame_index(tracking_start_ts, exo_ts)
+        max_frames: int | None = config.tracking_max_frames
+        end_index: int = total_frames if max_frames is None else min(total_frames, start_index + max_frames)
+
+        if end_index <= start_index:
+            frame_range: range = range(0)
+        else:
+            frame_range = range(start_index, end_index)
+
+        frame_iter: Iterable[int]
+        if mv_hand_tracker.config.verbose:
+            frame_iter = cast(Iterable[int], tqdm(frame_range, total=len(frame_range)))
+        else:
+            frame_iter = frame_range
+
+        #####################################
+        # 5. Run Tracking And Log Outputs   #
+        #####################################
+        for frame_idx in frame_iter:
+            ts_nano: int = int(exo_ts[frame_idx])
+            rr.set_time(timeline=timeline, duration=ts_nano * 1e-9)
+
+            bgr_views: list[UInt8[ndarray, "H W 3"]] = tracking_reader[frame_idx]
+            rgb_views: list[UInt8[ndarray, "H W 3"]] = [
+                cv2.cvtColor(bgr_hw3, cv2.COLOR_BGR2RGB) for bgr_hw3 in bgr_views
+            ]
+            rgb_batch: UInt8[ndarray, "n_views H W 3"] = np.stack(rgb_views, axis=0)
+
+            hand_state: MultiHandState = mv_hand_tracker(
+                rgb_batch=rgb_batch,
+                pinhole_param_list=pinhole_param_list,
+                hand_state=hand_state,
+                recording=config.rr_config.rec_stream,
+            )
+
+            log_mano_outputs(
+                hand_state=hand_state,
+                tracker=mv_hand_tracker,
                 pinhole_param_list=pinhole_param_list,
                 parent_log_path=parent_log_path,
+                recording=config.rr_config.rec_stream,
             )
-
-            tracking_reader: MultiVideoReader = MultiVideoReader(video_path_list)
-            hand_state: MultiHandState = MultiHandState()
-
-            total_frames: int = int(exo_ts.shape[0])
-            tracking_start_ts: int = (
-                config.tracking_start_ts_nano
-                if config.tracking_start_ts_nano is not None
-                else (config.ts_nano if config.ts_nano is not None else int(exo_ts[0]))
-            )
-            start_index: int = timestamp_to_frame_index(tracking_start_ts, exo_ts)
-            max_frames: int | None = config.tracking_max_frames
-            end_index: int = total_frames if max_frames is None else min(total_frames, start_index + max_frames)
-
-            if end_index <= start_index:
-                frame_range = range(0)
-            else:
-                frame_range = range(start_index, end_index)
-
-            frame_iter = tqdm(frame_range, total=len(frame_range)) if mv_hand_tracker.config.verbose else frame_range
-
-            for frame_idx in frame_iter:
-                ts_nano: int = int(exo_ts[frame_idx])
-                rr.set_time(timeline=timeline, duration=ts_nano * 1e-9)
-
-                bgr_views: list[UInt8[ndarray, "H W 3"]] = tracking_reader[frame_idx]
-                rgb_views: list[UInt8[ndarray, "H W 3"]] = [
-                    cv2.cvtColor(bgr_hw3, cv2.COLOR_BGR2RGB) for bgr_hw3 in bgr_views
-                ]
-                rgb_batch: UInt8[ndarray, "n_views H W 3"] = np.stack(rgb_views, axis=0)
-
-                hand_state: MultiHandState = mv_hand_tracker(
-                    rgb_batch=rgb_batch,
-                    pinhole_param_list=pinhole_param_list,
-                    hand_state=hand_state,
-                    recording=config.rr_config.rec_stream,
-                )
-
-                log_mano_outputs(
-                    hand_state=hand_state,
-                    tracker=mv_hand_tracker,
-                    pinhole_param_list=pinhole_param_list,
-                    parent_log_path=parent_log_path,
-                    recording=config.rr_config.rec_stream,
-                )
 
     print(f"Inference completed in {timer() - start:.2f} seconds")

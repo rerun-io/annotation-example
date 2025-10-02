@@ -217,11 +217,12 @@ def main(config: BenchmarkHandCalibConfig) -> None:
         hand_detector=hand_detection_engine,
         hand_keypoint_detector=hand_keypoint_engine,
         config=config.hand_calibrator,
+        parent_log_path=parent_log_path,
     )
     hand_calibrator(
         exo_cam_list=exo_sequence.exo_cam_list,
         rgb_ts_batch=rgb_ts_batch,
-        parent_log_path=parent_log_path,
+        recording=config.rr_config.rec_stream,
     )
 
     print(f"Total time taken: {timer() - start_time:.2f} seconds")
