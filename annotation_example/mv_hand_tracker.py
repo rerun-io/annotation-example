@@ -15,7 +15,7 @@ from simplecv.data.skeleton.mediapipe import MEDIAPIPE_IDS
 from simplecv.ops.mano.mano_np import ManoSimpleLayerNP
 from simplecv.ops.mano.optim_jax_single import OptimInput, OptimResult, PoseOptimConfig, SingleHandOptim
 from simplecv.ops.triangulate import batch_triangulate
-from simplecv.rerun_log_utils import (
+from simplecv.rerun_custom_types import (
     Points2DWithConfidence,
     Points3DWithConfidence,
     confidence_scores_to_rgb,

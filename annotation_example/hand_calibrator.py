@@ -21,7 +21,7 @@ from simplecv.ops.mano.optim_jax_single_shape import (
     SingleHandShapeOptim,
 )
 from simplecv.ops.triangulate import batch_triangulate
-from simplecv.rerun_log_utils import Points2DWithConfidence, Points3DWithConfidence, confidence_scores_to_rgb
+from simplecv.rerun_custom_types import Points2DWithConfidence, Points3DWithConfidence, confidence_scores_to_rgb
 from wilor_nano.hand_detection import DetectionResult, HandDetector
 from wilor_nano.hand_keypoints import KeypointResults, WilorHandKeypointDetector
 
@@ -221,6 +221,7 @@ class HandCalibrator:
         exo_cam_list: list[PinholeParameters],
         rgb_ts_batch: UInt8[ndarray, "n_frames n_views H W 3"],
         parent_log_path: Path,
+        recording: rr.RecordingStream | None = None,
     ) -> HandCalibrationResult:
         calibration_root: Path = parent_log_path / "hand_calibration"
 

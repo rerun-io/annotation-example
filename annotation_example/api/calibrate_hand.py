@@ -19,6 +19,7 @@ from simplecv.data.skeleton.coco_133 import (
     COCO_133_LINKS,
 )
 from simplecv.data.skeleton.mediapipe import MEDIAPIPE_ID2NAME, MEDIAPIPE_LINKS
+from simplecv.ops.pc_utils import estimate_voxel_size
 from simplecv.rerun_log_utils import (
     RerunTyroConfig,
     log_pinhole,
@@ -29,7 +30,7 @@ from tqdm import tqdm
 from wilor_nano.hand_detection import HandDetector, HandDetectorConfig
 from wilor_nano.hand_keypoints import HandKeypointDetectorConfig, WilorHandKeypointDetector
 
-from annotation_example.api.benchmark_hand_calib import (
+from annotation_example.api.benchmark_hand_pipeline import (
     mv_reader_to_rgb_ts_batch,
 )
 from annotation_example.api.hand_tracker import log_mano_outputs
@@ -290,12 +291,16 @@ def main(config: HandCalibConfig) -> None:
 
     pinhole_param_list: list[PinholeParameters] = results.pinhole_param_list
     pcd: o3d.geometry.PointCloud = results.pcd
+    # Automatically determine optimal voxel size based on point cloud characteristics
+    voxel_size: float = estimate_voxel_size(np.asarray(pcd.points, dtype=np.float32), target_points=50_000)
+    pcd_ds = pcd.voxel_down_sample(voxel_size)
+
     for pinhole, input_log_path in zip(pinhole_param_list, input_log_paths, strict=True):
         cam_log_path: Path = input_log_path.parent.parent
         log_pinhole(camera=pinhole, cam_log_path=cam_log_path, image_plane_distance=0.1, static=True)
 
-    filtered_points: Float[ndarray, "final_points 3"] = np.asarray(pcd.points, dtype=np.float32)
-    filtered_colors: Float[ndarray, "final_points 3"] = np.asarray(pcd.colors, dtype=np.float32)
+    filtered_points: Float[ndarray, "final_points 3"] = np.asarray(pcd_ds.points, dtype=np.float32)
+    filtered_colors: Float[ndarray, "final_points 3"] = np.asarray(pcd_ds.colors, dtype=np.float32)
 
     rr.log(
         f"{parent_log_path}/pointcloud",

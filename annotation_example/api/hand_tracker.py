@@ -19,18 +19,16 @@ from simplecv.apis.view_exoego import (
 from simplecv.camera_parameters import Intrinsics, PinholeParameters
 from simplecv.configs.exoego_dataset_configs import AnnotatedExoEgoDatasetUnion
 from simplecv.data.exo.base_exo import BaseExoSequence
-from simplecv.data.exoego.base_exoego import BaseExoEgoSequence, ExoEgoLabels
+from simplecv.data.exoego.base_exoego import BaseExoEgoSequence
 from simplecv.data.exoego.hocap import HocapSequence
 from simplecv.data.skeleton.coco_133 import (
     COCO_133_ID2NAME,
     COCO_133_LINKS,
 )
 from simplecv.data.skeleton.mediapipe import MEDIAPIPE_ID2NAME, MEDIAPIPE_IDS, MEDIAPIPE_LINKS
+from simplecv.rerun_custom_types import Points2DWithConfidence, Points3DWithConfidence, confidence_scores_to_rgb
 from simplecv.rerun_log_utils import (
-    Points2DWithConfidence,
-    Points3DWithConfidence,
     RerunTyroConfig,
-    confidence_scores_to_rgb,
 )
 from simplecv.video_io import MultiVideoReader
 from tqdm import tqdm
