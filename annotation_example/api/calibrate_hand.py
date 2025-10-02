@@ -389,7 +389,7 @@ def main(config: HandCalibConfig) -> None:
                 ]
                 rgb_batch: UInt8[ndarray, "n_views H W 3"] = np.stack(rgb_views, axis=0)
 
-                hand_state = mv_hand_tracker(
+                hand_state: MultiHandState = mv_hand_tracker(
                     rgb_batch=rgb_batch,
                     pinhole_param_list=pinhole_param_list,
                     hand_state=hand_state,

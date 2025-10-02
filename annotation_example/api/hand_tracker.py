@@ -94,6 +94,21 @@ def log_mano_outputs(
     recording: rr.RecordingStream | None = None,
 ) -> None:
     """Log optimized MANO meshes together with 3D keypoints and per-view projections."""
+    # log the triangulated coco 133 keypoints if available
+    if np.any(np.isfinite(hand_state.xyz_coco)):
+        conf_colors_3d: UInt8[ndarray, "1 133 3"] = confidence_scores_to_rgb(np.ones((1, 133, 1), dtype=np.float32))
+        rr.log(
+            str(parent_log_path / "mano_fits/coco_133/keypoints_3d"),
+            Points3DWithConfidence(
+                positions=hand_state.xyz_coco[0],
+                confidences=np.ones((133,), dtype=np.float32),
+                class_ids=2,
+                keypoint_ids=list(COCO_133_ID2NAME.keys()),
+                show_labels=False,
+                colors=conf_colors_3d[0],
+            ),
+            recording=recording,
+        )
 
     for hand_label in HAND_LABELS:
         mano_history: ManoHistory = getattr(hand_state, hand_label)

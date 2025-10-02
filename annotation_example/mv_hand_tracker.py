@@ -62,6 +62,8 @@ class MultiHandState:
     """Temporal MANO history for the left hand."""
     right: ManoHistory = field(default_factory=ManoHistory)
     """Temporal MANO history for the right hand."""
+    xyz_coco: Float[ndarray, "1 133 3"] = field(default_factory=lambda: np.full((1, 133, 3), np.nan, dtype=np.float32))
+    """Triangulated COCO 133 keypoints for both hands combined into coco 133 format."""
 
 
 @dataclass
@@ -131,6 +133,11 @@ class MultiViewHandTracker:
     ) -> MultiHandState:
         """Run hand detection followed by per-view keypoint refinement."""
 
+        xyz_coco: Float[ndarray, "1 133 3"] = np.full(
+            (1, 133, 3),
+            np.nan,
+            dtype=np.float32,
+        )
         for hand_label in HAND_LABELS:
             mano_history: ManoHistory = getattr(hand_state, hand_label)
             use_tracking: bool = (
@@ -177,6 +184,9 @@ class MultiViewHandTracker:
                 hand_label=hand_label,
                 recording=recording,
             )
+            # Fill in the triangulated keypoints into the full COCO set.
+            fill_idx = RIGHT_HAND_IDX if hand_label == "right" else LEFT_HAND_IDX
+            xyz_coco[0, fill_idx, :3] = np.nan if xyzc is None else xyzc[:, :3]
 
             mano_fit: ManoResults | None = self._fit_mano_model(
                 uvc_batch=uvc_batch,
@@ -192,6 +202,8 @@ class MultiViewHandTracker:
                 mano_history.t_minus_1_mano = None
                 mano_history.t_mano = None
 
+        # Update the combined state to return.
+        hand_state.xyz_coco = xyz_coco
         return hand_state
 
     def _detect_hands(

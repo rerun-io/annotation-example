@@ -16,6 +16,7 @@ from natsort import natsorted
 from numpy import ndarray
 from rerun.event import ContainerSelectionItem, EntitySelectionItem, ViewSelectionItem
 from simplecv.data.skeleton.mediapipe import MEDIAPIPE_ID2NAME, MEDIAPIPE_IDS, MEDIAPIPE_LINKS
+from simplecv.ops.pc_utils import estimate_voxel_size
 from simplecv.rerun_log_utils import (
     Points2DWithConfidence,
     confidence_scores_to_rgb,
@@ -823,8 +824,11 @@ class Controller:
 
         progress(0.5, desc="Logging calibration results…")
 
-        pcd_ds: o3d.geometry.PointCloud = mv_results.pcd
-        # log the pointcloud
+        pcd: o3d.geometry.PointCloud = mv_results.pcd
+        # Automatically determine optimal voxel size based on point cloud characteristics
+        voxel_size: float = estimate_voxel_size(np.asarray(pcd.points, dtype=np.float32), target_points=50_000)
+        pcd_ds = pcd.voxel_down_sample(voxel_size)
+
         filtered_points: Float[ndarray, "final_points 3"] = np.asarray(pcd_ds.points, dtype=np.float32)
         filtered_colors: Float[ndarray, "final_points 3"] = np.asarray(pcd_ds.colors, dtype=np.float32)
 
