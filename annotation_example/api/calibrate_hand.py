@@ -138,7 +138,7 @@ def parse_input(
     input_type : Literal["videos", "images"]
         The type of input to parse. Must be either "videos" or "images".
     config : HandCalibConfig
-        Configuration object containing paths and settings, such as image_dir, videos_dir, ts_idx, and ts_ns.
+        Configuration object containing paths and settings, such as image_dir, videos_dir, and calib_ts_nano.
     parent_log_path : Path
         The parent directory path for logging input data.
     timeline : str
@@ -226,8 +226,8 @@ def parse_input(
     if input_type == "videos":
         assert mv_reader is not None, "MultiVideoReader must be initialized for video inputs"
         assert min_exo_ts is not None, "Timestamps are required for video inputs"
-        if config.ts_nano is not None:
-            ts_nanos: int = config.ts_nano
+        if config.calib_ts_nano is not None:
+            ts_nanos: int = config.calib_ts_nano
             frame_index: int = timestamp_to_frame_index(time_ns=ts_nanos, frame_timestamps_ns=min_exo_ts)
         else:
             frame_index = 0
@@ -258,12 +258,12 @@ class HandCalibConfig:
     """Directory containing input images."""
     videos_dir: Path | None = None
     """Directory containing input videos."""
-    ts_nano: int | None = None
-    """Optional absolute timestamp in nanoseconds for selecting a video frame (floored to the nearest prior frame)."""
+    calib_ts_nano: int | None = None
+    """Optional nanosecond timestamp used to select calibration frames for cameras and MANO."""
     max_frames: int | None = None
     """Maximum number of frames to process. If None, all frames are processed."""
     tracking_start_ts_nano: int | None = None
-    """Optional nanosecond timestamp to start MANO tracking from; defaults to the calibration timestamp."""
+    """Optional nanosecond timestamp to start MANO tracking from; defaults to ``0`` when omitted."""
     tracking_max_frames: int | None = None
     """Optional number of frames to run MANO tracking for; defaults to all remaining frames."""
     mv_hand_config: MultiViewHandTrackerConfig = field(default_factory=MultiViewHandTrackerConfig)
@@ -361,7 +361,7 @@ def main(config: HandCalibConfig) -> None:
             hand_detector=hand_detection_engine,
             hand_keypoint_detector=hand_keypoint_engine,
             config=HandCalibratorConfig(
-                mano_optim_iters=30, ts_nano=config.ts_nano, hand_side=config.calib_hand_side, verbose=False
+                mano_optim_iters=30, ts_nano=config.calib_ts_nano, hand_side=config.calib_hand_side, verbose=False
             ),
             parent_log_path=parent_log_path,
         )
@@ -373,7 +373,9 @@ def main(config: HandCalibConfig) -> None:
         video_path_list: list[Path] = natsorted(config.videos_dir.glob("*.mp4"))
         mv_reader = MultiVideoReader(video_path_list)
 
-        target_ts_nano: int = config.ts_nano if config.ts_nano is not None else frame_index_to_timestamp(exo_ts, 0)
+        target_ts_nano: int = (
+            config.calib_ts_nano if config.calib_ts_nano is not None else frame_index_to_timestamp(exo_ts, 0)
+        )
         frame_index: int = timestamp_to_frame_index(target_ts_nano, exo_ts)
         frame_timestamp_ns: int = frame_index_to_timestamp(exo_ts, frame_index)
         frame_timestamp_seconds: float = frame_timestamp_ns * 1e-9
@@ -413,7 +415,7 @@ def main(config: HandCalibConfig) -> None:
         tracking_start_ts: int = (
             config.tracking_start_ts_nano
             if config.tracking_start_ts_nano is not None
-            else (config.ts_nano if config.ts_nano is not None else int(exo_ts[0]))
+            else 0
         )
         start_index: int = timestamp_to_frame_index(tracking_start_ts, exo_ts)
         max_frames: int | None = config.tracking_max_frames
