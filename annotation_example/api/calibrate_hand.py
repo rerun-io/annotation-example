@@ -121,7 +121,12 @@ class ParsedInputs(NamedTuple):
 
 
 def parse_input(
-    input_type: Literal["videos", "images"], config: "HandCalibConfig", parent_log_path: Path, timeline: str
+    input_type: Literal["videos", "images"],
+    image_dir: Path | None,
+    videos_dir: Path | None,
+    calib_ts_nano: int | None,
+    parent_log_path: Path,
+    timeline: str,
 ) -> ParsedInputs:
     """
     Parses input data based on the specified type, either images or videos, and returns a ParsedInputs NamedTuple.
@@ -137,8 +142,12 @@ def parse_input(
     ----------
     input_type : Literal["videos", "images"]
         The type of input to parse. Must be either "videos" or "images".
-    config : HandCalibConfig
-        Configuration object containing paths and settings, such as image_dir, videos_dir, and calib_ts_nano.
+    image_dir : Path | None
+        Directory containing input images when ``input_type`` is ``"images"``.
+    videos_dir : Path | None
+        Directory containing input videos when ``input_type`` is ``"videos"``.
+    calib_ts_nano : int | None
+        Optional nanosecond timestamp used to select calibration frames for videos.
     parent_log_path : Path
         The parent directory path for logging input data.
     timeline : str
@@ -151,7 +160,6 @@ def parse_input(
         - rgb_list: List of RGB images, each a 3D numpy array with shape (H, W, 3) and dtype uint8.
         - input_log_paths: List of input log paths (image paths for images, video paths for videos).
         - exo_ts: Timestamp array for the shortest video (in nanoseconds), or None for images.
-        - selected_timestamp_ns: Timestamp (nanoseconds) for the selected frame, or None for images.
 
     Raises
     ------
@@ -171,16 +179,16 @@ def parse_input(
     bgr_list: list[UInt8[ndarray, "H W 3"]] | None = None
     match input_type:
         case "images":
-            if config.image_dir is None:
+            if image_dir is None:
                 raise ValueError("Image input requested but 'image_dir' is not provided")
-            image_dir: Path = config.image_dir
+            resolved_image_dir: Path = image_dir
             image_paths: list[Path] = []
 
             for ext in SUPPORTED_IMAGE_EXTENSIONS:
-                image_paths.extend(image_dir.glob(f"*{ext}"))
+                image_paths.extend(resolved_image_dir.glob(f"*{ext}"))
             image_paths = natsorted(image_paths)
             assert len(image_paths) > 0, (
-                f"No images found in {config.image_dir} in supported formats {SUPPORTED_IMAGE_EXTENSIONS}"
+                f"No images found in {resolved_image_dir} in supported formats {SUPPORTED_IMAGE_EXTENSIONS}"
             )
 
             bgr_list_images: list[UInt8[ndarray, "H W 3"]] = []
@@ -197,15 +205,15 @@ def parse_input(
                 parent_log_path / "exo" / f"camera_{i}" / "pinhole" / "image" for i in range(len(bgr_list))
             ]
         case "videos":
-            if config.videos_dir is None:
+            if videos_dir is None:
                 raise ValueError("Video input requested but 'videos_dir' is not provided")
-            video_dir: Path = config.videos_dir
+            video_dir: Path = videos_dir
             video_path_list: list[Path] = natsorted(video_dir.glob("*.mp4"))
             input_log_paths: list[Path] = [
                 parent_log_path / "exo" / f"camera_{i}" / "pinhole" / "video" for i in range(len(video_path_list))
             ]
             exo_ts_entries: list[Int[ndarray, "num_frames"]] = []
-            assert len(video_path_list) > 0, f"No videos found in {config.videos_dir}"
+            assert len(video_path_list) > 0, f"No videos found in {video_dir}"
             for i, video_path in enumerate(video_path_list):
                 exo_ts: Int[ndarray, "num_frames"] = log_video(
                     video_path=video_path,
@@ -226,8 +234,8 @@ def parse_input(
     if input_type == "videos":
         assert mv_reader is not None, "MultiVideoReader must be initialized for video inputs"
         assert min_exo_ts is not None, "Timestamps are required for video inputs"
-        if config.calib_ts_nano is not None:
-            ts_nanos: int = config.calib_ts_nano
+        if calib_ts_nano is not None:
+            ts_nanos: int = calib_ts_nano
             frame_index: int = timestamp_to_frame_index(time_ns=ts_nanos, frame_timestamps_ns=min_exo_ts)
         else:
             frame_index = 0
@@ -290,7 +298,14 @@ def main(config: HandCalibConfig) -> None:
     ###################
     input_type: Literal["videos", "images"] = "images" if config.image_dir is not None else "videos"
 
-    parsed_inputs: ParsedInputs = parse_input(input_type, config, parent_log_path, timeline)
+    parsed_inputs: ParsedInputs = parse_input(
+        input_type=input_type,
+        image_dir=config.image_dir,
+        videos_dir=config.videos_dir,
+        calib_ts_nano=config.calib_ts_nano,
+        parent_log_path=parent_log_path,
+        timeline=timeline,
+    )
     rgb_list: list[UInt8[ndarray, "H W 3"]] = parsed_inputs.rgb_list
     input_log_paths: list[Path] = parsed_inputs.input_log_paths
     exo_ts: Int[ndarray, "num_frames"] | None = parsed_inputs.exo_ts
