@@ -29,7 +29,7 @@ from rtmlib.visualization import coco17
 from serde import serde
 from serde.json import from_json, to_json
 from simplecv.camera_parameters import Extrinsics, Intrinsics, PinholeParameters
-from simplecv.rerun_log_utils import Points2DWithConfidence, confidence_scores_to_rgb
+from simplecv.rerun_custom_types import Points2DWithConfidence, confidence_scores_to_rgb
 from torchvision import transforms
 from transformers import AutoModelForImageSegmentation
 

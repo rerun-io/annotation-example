@@ -17,12 +17,8 @@ from numpy import ndarray
 from rerun.event import ContainerSelectionItem, EntitySelectionItem, ViewSelectionItem
 from simplecv.data.skeleton.mediapipe import MEDIAPIPE_ID2NAME, MEDIAPIPE_IDS, MEDIAPIPE_LINKS
 from simplecv.ops.pc_utils import estimate_voxel_size
-from simplecv.rerun_log_utils import (
-    Points2DWithConfidence,
-    confidence_scores_to_rgb,
-    log_pinhole,
-    log_video,
-)
+from simplecv.rerun_custom_types import Points2DWithConfidence, confidence_scores_to_rgb
+from simplecv.rerun_log_utils import log_pinhole, log_video
 from simplecv.video_io import MultiVideoReader
 from wilor_nano.hand_detection import DetectionResult
 from wilor_nano.hand_keypoints import KeypointResults

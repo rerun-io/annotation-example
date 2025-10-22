@@ -5,6 +5,7 @@ from typing import Literal
 import cv2
 import numpy as np
 import rerun as rr
+import torch
 from jaxtyping import Bool, Float, Int, UInt8
 from monopriors.apis.multiview_calibration import (
     MultiViewCalibrator,
@@ -15,7 +16,7 @@ from numpy import ndarray
 from simplecv.camera_parameters import PinholeParameters
 from simplecv.data.skeleton.mediapipe import MEDIAPIPE_IDS
 from simplecv.ops.triangulate import batch_triangulate
-from simplecv.rerun_log_utils import (
+from simplecv.rerun_custom_types import (
     Points2DWithConfidence,
     Points3DWithConfidence,
     confidence_scores_to_rgb,
@@ -51,9 +52,25 @@ class Engine:
             self.hand_keypoint_engine = WilorHandKeypointDetector(HandKeypointDetectorConfig(verbose=False))
         elif kpt_network == "rtmpose":
             self.hand_keypoint_engine = RTMPoseHandKeypointDetector(HandKeypointDetectorConfig(verbose=False))
-        self.mv_calibrator: MultiViewCalibrator = MultiViewCalibrator(
-            parent_log_path=Path("world"), config=MultiViewCalibratorConfig()
-        )
+        self.mv_calibrator: MultiViewCalibrator | None = None
+        self.mv_calibrator_error: str | None = None
+        preferred_device: Literal["cuda", "cpu"] = "cuda" if torch.cuda.is_available() else "cpu"
+        if preferred_device == "cuda":
+            segment_people: bool = True
+            mv_config: MultiViewCalibratorConfig = MultiViewCalibratorConfig(
+                device=preferred_device, segment_people=segment_people
+            )
+            try:
+                self.mv_calibrator = MultiViewCalibrator(parent_log_path=Path("world"), config=mv_config)
+            except (RuntimeError, torch.cuda.OutOfMemoryError) as err:
+                self.mv_calibrator_error = (
+                    "Failed to initialize MultiViewCalibrator on CUDA; multi-view calibration disabled. "
+                    f"Original error: {err}"
+                )
+                print(self.mv_calibrator_error)
+                self.mv_calibrator = None
+        else:
+            self.mv_calibrator_error = "CUDA is unavailable; MultiViewCalibrator disabled."
         self._ego_mv_reader: MultiVideoReader | None = None
         self._exo_mv_reader: MultiVideoReader | None = None
 
@@ -316,6 +333,9 @@ class Engine:
                 yield stream.read(), state
 
     def calibrate_mv(self, state: AppState, rgb_list: list[UInt8[ndarray, "H W 3"]]) -> MVCalibResults:
+        if self.mv_calibrator is None:
+            message: str = self.mv_calibrator_error or "MultiViewCalibrator is not initialized."
+            raise RuntimeError(message)
         recording: rr.RecordingStream = get_recording(state.recording_id)
         return self.mv_calibrator(rgb_list=rgb_list, recording=recording)
 

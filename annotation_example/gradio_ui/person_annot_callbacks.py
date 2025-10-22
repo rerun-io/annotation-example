@@ -7,7 +7,7 @@ from gradio_rerun.events import (
     SelectionChange,
 )
 from jaxtyping import Float, UInt8
-from simplecv.rerun_log_utils import Points2DWithConfidence
+from simplecv.rerun_custom_types import Points2DWithConfidence
 
 from annotation_example.gradio_ui.person_annot_utils import (
     SELECTED_COLOR,
