@@ -5,12 +5,12 @@ from typing import cast
 import gradio as gr
 from gradio_rerun import Rerun
 
-from mv_api.gradio_ui.label_ui.controller import Controller
-from mv_api.gradio_ui.label_ui.engine import Engine
-from mv_api.gradio_ui.label_ui.label_callbacks import track_current_time
-from mv_api.gradio_ui.label_ui.panels.bbox_panel import BoundingBoxPanel
-from mv_api.gradio_ui.label_ui.panels.info_panel import InfoPanel
-from mv_api.gradio_ui.label_ui.state import AppState
+from annotation_example.gradio_ui.label_ui.controller import Controller
+from annotation_example.gradio_ui.label_ui.engine import Engine
+from annotation_example.gradio_ui.label_ui.label_callbacks import track_current_time
+from annotation_example.gradio_ui.label_ui.panels.bbox_panel import BoundingBoxPanel
+from annotation_example.gradio_ui.label_ui.panels.info_panel import InfoPanel
+from annotation_example.gradio_ui.label_ui.state import AppState
 
 INPUT_TAB_ID: str = "input_tab"
 OUTPUT_TAB_ID: str = "output_tab"

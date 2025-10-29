@@ -24,15 +24,59 @@ from simplecv.apis.view_exoego import (
 from simplecv.camera_parameters import PinholeParameters
 from simplecv.data.exoego.base_exoego import BaseExoEgoSequence
 from simplecv.data.exoego.rrd_exoego import RRDExoEgoConfig
-from simplecv.data.skeleton.coco_133 import COCO_133_IDS, LEFT_HAND_IDX, RIGHT_HAND_IDX
+from simplecv.data.skeleton.coco_133 import (
+    COCO_133_ID2NAME,
+    COCO_133_IDS,
+    COCO_133_LINKS,
+    LEFT_HAND_IDX,
+    RIGHT_HAND_IDX,
+)
 from simplecv.rerun_custom_types import Points2DWithConfidence, confidence_scores_to_rgb
 from simplecv.rerun_log_utils import RerunTyroConfig
 
-from mv_api.api.full_exoego_pipeline import set_annotation_context
-from mv_api.coco133_layers import COCO133_PREDICTION_LAYER_TO_PATH, Coco133AnnotationLayer
-from mv_api.gradio_ui.label_ui.engine import Engine
-from mv_api.gradio_ui.label_ui.recording_utils import get_recording
-from mv_api.gradio_ui.label_ui.state import AppState, BoundingBoxDraft, ConfirmedKeypointRecord
+from annotation_example.coco133_layers import (
+    COCO133_LAYER_COLORS,
+    COCO133_LAYER_LABELS,
+    COCO133_PREDICTION_LAYER_TO_PATH,
+    Coco133AnnotationLayer,
+)
+from annotation_example.gradio_ui.label_ui.engine import Engine
+from annotation_example.gradio_ui.label_ui.recording_utils import get_recording
+from annotation_example.gradio_ui.label_ui.state import AppState, BoundingBoxDraft, ConfirmedKeypointRecord
+
+
+def _log_annotation_context(*, recording: rr.RecordingStream | None) -> None:
+    keypoint_infos: list[rr.AnnotationInfo] = [
+        rr.AnnotationInfo(id=int(kpt_id), label=COCO_133_ID2NAME[int(kpt_id)]) for kpt_id in COCO_133_IDS
+    ]
+
+    class_descriptions: list[rr.ClassDescription] = []
+    for layer in (
+        Coco133AnnotationLayer.GT,
+        Coco133AnnotationLayer.RAW_2D,
+        Coco133AnnotationLayer.TRACKED_2D,
+        Coco133AnnotationLayer.PROJECTED_2D,
+        Coco133AnnotationLayer.OPTIMIZED_2D,
+    ):
+        label: str = COCO133_LAYER_LABELS[layer]
+        class_descriptions.append(
+            rr.ClassDescription(
+                info=rr.AnnotationInfo(
+                    id=int(layer),
+                    label=label,
+                    color=COCO133_LAYER_COLORS[layer],
+                ),
+                keypoint_annotations=keypoint_infos,
+                keypoint_connections=COCO_133_LINKS,
+            )
+        )
+
+    rr.log(
+        "/",
+        rr.AnnotationContext(class_descriptions),
+        static=True,
+        recording=recording,
+    )
 
 
 class Controller:
@@ -96,7 +140,7 @@ class Controller:
             static=True,
             recording=recording,
         )
-        set_annotation_context(recording=recording)
+        _log_annotation_context(recording=recording)
 
         # Setup the scene and log initial data
         scene_setup_result: SceneSetupResult = setup_scene(
@@ -217,7 +261,7 @@ class Controller:
                 "/",
                 exoego_sequence.world_coordinate_system,
             )
-            set_annotation_context(recording=None)
+            _log_annotation_context(recording=None)
 
             # Setup the scene and log initial data
             scene_setup_result: SceneSetupResult = setup_scene(
@@ -271,6 +315,8 @@ class Controller:
                     pinhole_paths=ego_pinhole_paths_save,
                     timeline=timeline,
                     shortest_timestamp=shortest_timestamp,
+                    confirmed_overrides=updated_state.confirmed_keypoints,
+                    video_timestamps_by_path=updated_state.video_timestamps_by_path,
                 )
 
             if updated_state.confirmed_keypoints:
@@ -325,7 +371,17 @@ class Controller:
         pinhole_paths: list[Path],
         timeline: str,
         shortest_timestamp: Int[ndarray, "n_frames"],
+        confirmed_overrides: dict[str, dict[int, ConfirmedKeypointRecord]] | None = None,
+        video_timestamps_by_path: dict[str, Int[np.ndarray, "n_frames"]] | None = None,
     ) -> None:
+        """Relay ego projected keypoints from the source RRD while folding in edits.
+
+        When exporting a labeled recording we start from the original per-frame projections
+        (to retain untouched frames and metadata) and selectively splice in any keypoints the
+        annotator confirmed in this session. The merged result is then logged back into the
+        new RRD, guaranteeing that saved annotations replace the previous projections instead
+        of being appended as separate, disconnected events.
+        """
         if self._source_rrd_path is None:
             raise gr.Error("Unable to relog projected keypoints; source RRD path is unknown.")
 
@@ -340,6 +396,7 @@ class Controller:
 
         n_keypoints: int = len(COCO_133_IDS)
         for pinhole_path in pinhole_paths:
+            # Pull the original projected layer (predicted coco133_uv) for this ego camera.
             projected_entity_path: Path = pinhole_path / "pred" / "coco133_uv" / self._coco_projected_variant
             projected_entity: str = self._with_leading_slash(projected_entity_path)
             table = self._read_entity_table(source_recordings, projected_entity)
@@ -363,9 +420,7 @@ class Controller:
                 )
             )
             if n_frames_available <= 0:
-                raise gr.Error(
-                    f"Projected keypoints at '{projected_entity}' contain no time-aligned samples."
-                )
+                raise gr.Error(f"Projected keypoints at '{projected_entity}' contain no time-aligned samples.")
 
             positions_trim: Float[ndarray, "n_frames n_kpts 2"] = positions_stack[:n_frames_available]
             confidences_trim: Float[ndarray, "n_frames n_kpts"] = confidences_stack[:n_frames_available]
@@ -374,12 +429,53 @@ class Controller:
             )
             timestamps_trim: Float[ndarray, "n_frames"] = shortest_timestamp[:n_frames_available].astype(np.float64)
 
+            # Determine whether the user confirmed any edits for this ego stream.
+            canonical_video_path: str = self._canonical_entity_path(pinhole_path / "video")
+            override_records: dict[int, ConfirmedKeypointRecord] | None = (
+                confirmed_overrides.get(canonical_video_path) if confirmed_overrides is not None else None
+            )
+            frame_timestamps: Int[np.ndarray, "n_frames"] | None = (
+                video_timestamps_by_path.get(canonical_video_path)
+                if video_timestamps_by_path is not None
+                else None
+            )
+
+            if override_records and frame_timestamps is not None and frame_timestamps.size > 0:
+                for timestamp_ns, record in override_records.items():
+                    # Translate the annotation timestamp to a frame index aligned with the replay.
+                    frame_idx: int = self._frame_index_from_timestamps(frame_timestamps, timestamp_ns)
+                    if frame_idx < 0 or frame_idx >= n_frames_available:
+                        continue
+                    record_positions: Float[ndarray, "n_kpts 2"] = record.positions.astype(np.float32, copy=False)
+                    record_confidences: Float[ndarray, "n_kpts"] = record.confidences.astype(np.float32, copy=False)
+                    record_colors: UInt8[ndarray, "n_kpts 3"] = record.colors.astype(np.uint8, copy=False)
+
+                    # Replace the corresponding frame slice with the confirmed hand keypoints.
+                    if record_positions.shape == positions_trim[frame_idx].shape:
+                        positions_trim[frame_idx] = record_positions
+                    else:
+                        shared_kpts: int = min(positions_trim.shape[1], record_positions.shape[0])
+                        positions_trim[frame_idx, :shared_kpts] = record_positions[:shared_kpts]
+
+                    if record_confidences.shape == confidences_trim[frame_idx].shape:
+                        confidences_trim[frame_idx] = record_confidences
+                    else:
+                        shared_kpts_conf: int = min(confidences_trim.shape[1], record_confidences.shape[0])
+                        confidences_trim[frame_idx, :shared_kpts_conf] = record_confidences[:shared_kpts_conf]
+
+                    if record_colors.shape == colors_trim[frame_idx].shape:
+                        colors_trim[frame_idx] = record_colors
+                    else:
+                        shared_kpts_colors: int = min(colors_trim.shape[1], record_colors.shape[0])
+                        colors_trim[frame_idx, :shared_kpts_colors] = record_colors[:shared_kpts_colors]
+
             target_entity: str = self._with_leading_slash(pinhole_path / "coco133_uv")
             canonical_target: str = self._canonical_entity_path(target_entity)
             self._projected_keypoints_cache[canonical_target] = (
                 positions_trim.astype(np.float32, copy=True),
                 confidences_trim.astype(np.float32, copy=True),
             )
+            # Log the merged stack back into the export recording (or cache only during reload).
             self._log_points2d_with_confidence(
                 entity_path=target_entity,
                 positions=positions_trim,
@@ -497,6 +593,15 @@ class Controller:
         confidences_flat: Float[ndarray, "n_total"] = confidences.reshape(-1).astype(np.float32, copy=False)
         colors_flat: UInt8[ndarray, "n_total 3"] = colors.reshape(-1, 3).astype(np.uint8, copy=False)
         durations: Float[ndarray, "n_frames"] = 1e-9 * timestamps_ns
+        keypoint_ids_flat: Int[ndarray, "n_total"] = np.tile(
+            np.asarray(COCO_133_IDS, dtype=np.int32),
+            n_frames,
+        )
+        class_ids_flat: Int[ndarray, "n_total"] = np.full(
+            positions_flat.shape[0],
+            self._coco_gt_class_id,
+            dtype=np.int32,
+        )
 
         if recording is not None:
             rr.log(entity_path, rr.Clear(recursive=True), recording=recording)
@@ -518,6 +623,8 @@ class Controller:
                         positions=positions_flat,
                         confidences=confidences_flat,
                         colors=colors_flat,
+                        class_ids=class_ids_flat,
+                        keypoint_ids=keypoint_ids_flat,
                     ).partition(keypoint_lengths),
                 ],
                 recording=recording,
@@ -542,6 +649,8 @@ class Controller:
                     positions=positions_flat,
                     confidences=confidences_flat,
                     colors=colors_flat,
+                    class_ids=class_ids_flat,
+                    keypoint_ids=keypoint_ids_flat,
                 ).partition(keypoint_lengths),
             ],
         )
@@ -812,10 +921,13 @@ class Controller:
             base_positions = cached_positions.astype(np.float32, copy=True)
             base_confidences = cached_confidences.astype(np.float32, copy=True)
         else:
-            cached_sequence: tuple[
-                Float[ndarray, "n_frames n_kpts 2"],
-                Float[ndarray, "n_frames n_kpts"],
-            ] | None = self._projected_keypoints_cache.get(canonical_pred_path)
+            cached_sequence: (
+                tuple[
+                    Float[ndarray, "n_frames n_kpts 2"],
+                    Float[ndarray, "n_frames n_kpts"],
+                ]
+                | None
+            ) = self._projected_keypoints_cache.get(canonical_pred_path)
             if cached_sequence is not None and frame_idx < cached_sequence[0].shape[0]:
                 positions_by_frame, confidences_by_frame = cached_sequence
                 base_positions = positions_by_frame[frame_idx].astype(np.float32, copy=True)
@@ -903,9 +1015,7 @@ class Controller:
                 confidences_snapshot[np.newaxis, ...].astype(np.float32, copy=True),
             )
         new_confirmed_by_path: dict[str, dict[int, ConfirmedKeypointRecord]] = dict(state.confirmed_keypoints)
-        path_records: dict[int, ConfirmedKeypointRecord] = dict(
-            new_confirmed_by_path.get(canonical_video_path, {})
-        )
+        path_records: dict[int, ConfirmedKeypointRecord] = dict(new_confirmed_by_path.get(canonical_video_path, {}))
         confirmed_record = ConfirmedKeypointRecord(
             entity_path=pred_path,
             timeline=timeline,
@@ -980,9 +1090,7 @@ class Controller:
             canonical_video_path
         )
         if existing_records is not None and state.current_time_ns in existing_records:
-            new_confirmed_by_path: dict[str, dict[int, ConfirmedKeypointRecord]] = dict(
-                state.confirmed_keypoints
-            )
+            new_confirmed_by_path: dict[str, dict[int, ConfirmedKeypointRecord]] = dict(state.confirmed_keypoints)
             trimmed_records: dict[int, ConfirmedKeypointRecord] = dict(existing_records)
             trimmed_records.pop(state.current_time_ns, None)
             if trimmed_records:

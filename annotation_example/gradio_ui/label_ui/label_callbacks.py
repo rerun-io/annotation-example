@@ -14,7 +14,7 @@ from rerun.event import (
     SelectionItem,
 )
 
-from mv_api.gradio_ui.label_ui.state import AppState
+from annotation_example.gradio_ui.label_ui.state import AppState
 
 
 def track_current_time(state: AppState, evt: TimeUpdate) -> AppState:

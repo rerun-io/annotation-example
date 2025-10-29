@@ -3,8 +3,8 @@ from dataclasses import dataclass
 import gradio as gr
 from gradio_rerun import Rerun
 
-from mv_api.gradio_ui.label_ui.controller import Controller
-from mv_api.gradio_ui.label_ui.label_callbacks import register_label_keypoint
+from annotation_example.gradio_ui.label_ui.controller import Controller
+from annotation_example.gradio_ui.label_ui.label_callbacks import register_label_keypoint
 
 
 @dataclass
@@ -64,27 +64,37 @@ class BoundingBoxPanel:
             register_label_keypoint,
             inputs=[state],
             outputs=[state],
+            concurrency_limit=None,
         ).then(
             ctrl.log_bbox_kpts,
             inputs=[state, self.corner_selector, self.hand_selector],
             outputs=[viewer, state, self.corner_selector],
+            concurrency_limit=None,
         )
         self.confirm_button.click(
             ctrl.confirm_bbox,
             inputs=[state, self.hand_selector],
             outputs=[viewer, state, self.corner_selector],
+            concurrency_limit=None,
         )
         self.clear_keypoints_button.click(
             ctrl.clear_current_keypoints,
             inputs=[state],
             outputs=[viewer, state],
+            concurrency_limit=None,
         )
 
         def _select_output_tab() -> gr.Tabs:
             return gr.Tabs(selected=output_tab_id)
 
-        self.save_rrd_button.click(_select_output_tab, inputs=None, outputs=[tabs]).then(
+        self.save_rrd_button.click(
+            _select_output_tab,
+            inputs=None,
+            outputs=[tabs],
+            concurrency_limit=None,
+        ).then(
             ctrl.save_annotated_rrd,
             inputs=[state],
             outputs=[state, annotated_rrd_file],
+            concurrency_limit=None,
         )

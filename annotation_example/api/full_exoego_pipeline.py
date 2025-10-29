@@ -2,7 +2,7 @@ from collections.abc import Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
 from timeit import default_timer as timer
-from typing import Literal, NamedTuple, cast
+from typing import Any, cast
 
 import cv2
 import numpy as np
@@ -10,28 +10,44 @@ import open3d as o3d
 import rerun as rr
 import rerun.blueprint as rrb
 import torch
-from jaxtyping import Float, Float32, Int, UInt8
+from jaxtyping import Bool, Float, Float32, Int, UInt8
 from monopriors.apis.multiview_calibration import MultiViewCalibrator, MultiViewCalibratorConfig, MVCalibResults
 from numpy import ndarray
 from simplecv.apis.view_exoego import (
     LogPaths,
     SceneSetupResult,
-    create_blueprint,
     filter_out_of_bounds_keypoints,
     setup_scene,
 )
 from simplecv.camera_parameters import Intrinsics, PinholeParameters
 from simplecv.configs.exoego_dataset_configs import AnnotatedExoEgoDatasetUnion
+from simplecv.data.ego.base_ego import BaseEgoSequence
+from simplecv.data.exo.base_exo import BaseExoSequence
 from simplecv.data.exoego.base_exoego import BaseExoEgoSequence
-from simplecv.data.skeleton.coco_133 import COCO_133_ID2NAME, COCO_133_IDS, COCO_133_LINKS
+from simplecv.data.skeleton.coco_133 import (
+    COCO_133_ID2NAME,
+    COCO_133_IDS,
+    COCO_133_LINKS,
+    FACE_IDX,
+    LEFT_HAND_IDX,
+    RIGHT_HAND_IDX,
+)
 from simplecv.ops.pc_utils import estimate_voxel_size
 from simplecv.ops.triangulate import proj_3d_vectorized
 from simplecv.ops.tsdf_depth_fuser import Open3DScaleInvariantFuser
 from simplecv.rerun_custom_types import Points2DWithConfidence, Points3DWithConfidence, confidence_scores_to_rgb
-from simplecv.rerun_log_utils import RerunTyroConfig, log_pinhole, log_video
+from simplecv.rerun_log_utils import RerunTyroConfig, log_pinhole
 from simplecv.video_io import MultiVideoReader
 from tqdm import tqdm
-from wilor_nano.hand_keypoints import FinalWilorPred, WilorHandKeypointDetector
+
+from annotation_example.coco133_layers import (
+    COCO133_LAYER_COLORS,
+    COCO133_LAYER_LABELS,
+    COCO133_PREDICTION_LAYER_TO_PATH,
+    Coco133AnnotationLayer,
+)
+from annotation_example.hand_keypoints import FinalWilorPred, HandKeypointDetectorConfig, WilorHandKeypointDetector
+from annotation_example.multiview_pose_estimator import MultiviewBodyTracker, MultiviewBodyTrackerConfig, MVHistory
 
 np.set_printoptions(suppress=True)
 
@@ -39,124 +55,71 @@ SUPPORTED_IMAGE_EXTENSIONS = (".png", ".jpg", ".jpeg")
 device = "cuda" if torch.cuda.is_available() else "cpu"
 
 
-def create_depth_views(parent_log_path: Path, camera_index: int) -> rrb.Tabs:
-    """
-    Create depth visualization tabs for a specific camera.
+def create_view_container(
+    *,
+    ego_video_log_paths: list[Path] | None = None,
+    exo_video_log_paths: list[Path] | None = None,
+    max_ego_videos_to_log: int = 4,
+    max_exo_videos_to_log: int = 8,
+) -> rrb.ContainerLike:
+    """Create a Rerun blueprint for visualizing ego- and exo-centric streams.
 
     Args:
-        parent_log_path: Parent log path for the camera views
-        camera_index: Index of the camera to create depth views for
+        ego_video_log_paths (list[Path] | None): Optional set of ego video entity
+            roots; each path becomes a tabbed 2D view alongside the spatial view.
+        exo_video_log_paths (list[Path] | None): Optional set of exo video entity
+            roots; each path becomes a tabbed 2D view beneath the spatial view.
+        max_exo_videos_to_log (Literal[4, 8]): Maximum number of exo video panels
+            to materialize when ``exo_video_log_paths`` is provided.
+        max_ego_videos_to_log (Literal[4, 8]): Maximum number of ego video panels
+            to materialize when ``ego_video_log_paths`` is provided.
 
     Returns:
-        Tabs blueprint containing depth and filtered depth views
+        rrb.Blueprint: Assembled layout containing the configured views.
     """
-    depth_views: rrb.Tabs = rrb.Tabs(
+    main_view = rrb.Spatial3DView(
+        origin="/",
         contents=[
-            rrb.Spatial2DView(
-                origin=f"{parent_log_path}/exo/camera_{camera_index}/pinhole/depth",
-                contents=[
-                    "+ $origin/**",
-                ],
-                name="Depth",
-            ),
-            rrb.Spatial2DView(
-                origin=f"{parent_log_path}/exo/camera_{camera_index}/pinhole/filtered_depth",
-                contents=[
-                    "+ $origin/**",
-                ],
-                name="Filtered Depth",
-            ),
-            rrb.Spatial2DView(
-                origin=f"{parent_log_path}/camera_{camera_index}/pinhole/refined_depth",
-                contents=[
-                    "+ $origin/**",
-                ],
-                name="MoGe Depth",
-            ),
+            "+ $origin/**",
+            "- /world/gt/env_pointcloud",  # hide raw point clouds by default
         ],
-        active_tab=2,
+        line_grid=rrb.archetypes.LineGrid3D(visible=False),
     )
-    return depth_views
 
+    if ego_video_log_paths is not None:
+        ego_view = rrb.Vertical(
+            contents=[
+                rrb.Tabs(
+                    rrb.Spatial2DView(origin=f"{video_log_path.parent}"),
+                )
+                for video_log_path in ego_video_log_paths[:max_ego_videos_to_log]
+            ]
+        )
+        main_view = rrb.Horizontal(
+            contents=[main_view, ego_view],
+            column_shares=[4, 1],
+        )
 
-def create_camera_row(parent_log_path: Path, camera_index: int) -> rrb.Horizontal:
-    """
-    Create a single camera row with 3 views: content, depth, and confidence.
+    if exo_video_log_paths is not None:
+        exo_view = rrb.Horizontal(
+            contents=[
+                rrb.Tabs(
+                    rrb.Spatial2DView(origin=f"{video_log_path.parent}"),
+                )
+                for video_log_path in exo_video_log_paths[:max_exo_videos_to_log]
+            ]
+        )
+        main_view = rrb.Vertical(
+            contents=[main_view, exo_view],
+            row_shares=[4, 1],
+        )
 
-    Args:
-        parent_log_path: Parent log path for the camera views
-        camera_index: Index of the camera to create views for
-
-    Returns:
-        Horizontal blueprint containing pinhole content, depth views, and confidence map
-    """
-    camera_row: rrb.Horizontal = rrb.Horizontal(
-        contents=[
-            rrb.Spatial2DView(
-                origin=f"{parent_log_path}/exo/camera_{camera_index}/pinhole/image",
-                contents=[
-                    "+ $origin/**",
-                ],
-                name="Image Content",
-            ),
-            create_depth_views(parent_log_path, camera_index),
-            rrb.Spatial2DView(
-                origin=f"{parent_log_path}/exo/camera_{camera_index}/pinhole/confidence",
-                contents=[
-                    "+ $origin/**",
-                ],
-                name="Confidence Map",
-            ),
-        ]
+    final_view = rrb.Horizontal(
+        contents=[main_view],
+        column_shares=[4, 1],
     )
-    return camera_row
 
-
-def chunk_cameras(num_cameras: int, chunk_size: int = 4) -> list[range]:
-    """
-    Group cameras into chunks of specified size.
-
-    Args:
-        num_cameras: Total number of cameras
-        chunk_size: Maximum cameras per chunk (default 4)
-
-    Returns:
-        List of ranges representing camera chunks
-    """
-    chunks: list[range] = [range(i, min(i + chunk_size, num_cameras)) for i in range(0, num_cameras, chunk_size)]
-    return chunks
-
-
-def create_tabbed_camera_view(parent_log_path: Path, num_cameras: int) -> rrb.Tabs:
-    """
-    Create tabbed interface grouping cameras by 4s.
-
-    Args:
-        parent_log_path: Parent log path for the camera views
-        num_cameras: Total number of cameras to display
-
-    Returns:
-        Tabs blueprint with each tab containing up to 4 camera rows
-    """
-    camera_chunks: list[range] = chunk_cameras(num_cameras)
-
-    tabs: list[rrb.Vertical] = []
-    for camera_range in camera_chunks:
-        # Create camera rows for this chunk
-        camera_rows: list[rrb.Horizontal] = [create_camera_row(parent_log_path, i) for i in camera_range]
-
-        # Create tab name
-        if camera_range.start + 1 == camera_range.stop:
-            tab_name: str = f"Camera {camera_range.start + 1}"
-        else:
-            tab_name = f"Cameras {camera_range.start + 1}-{camera_range.stop}"
-
-        # Create tab content
-        tab_content: rrb.Vertical = rrb.Vertical(contents=camera_rows, name=tab_name)
-        tabs.append(tab_content)
-
-    tabbed_view: rrb.Tabs = rrb.Tabs(contents=tabs, name="Depths Tab")
-    return tabbed_view
+    return final_view
 
 
 def compute_square_bbox(
@@ -202,53 +165,32 @@ def compute_square_bbox(
     return xyxy
 
 
-def create_blueprint_old(parent_log_path: Path, num_images: int, show_videos: bool = False) -> rrb.Blueprint:
-    view3d = rrb.Spatial3DView(
-        origin=f"{parent_log_path}",
-        contents=[
-            "+ $origin/**",
-            f"- /{parent_log_path}/pointcloud",
-            # don't include depths in the 3D view, as they can be very noisy
-            *[f"- /{parent_log_path}/exo/camera_{i}/pinhole/depth" for i in range(num_images)],
-            *[f"- /{parent_log_path}/exo/camera_{i}/pinhole/filtered_depth" for i in range(num_images)],
-            *[f"- /{parent_log_path}/exo/camera_{i}/pinhole/refined_depth" for i in range(num_images)],
-            *[f"- /{parent_log_path}/exo/camera_{i}/pinhole/confidence" for i in range(num_images)],
-            *[f"- /{parent_log_path}/exo/camera_{i}/pinhole/image" for i in range(num_images)],
-        ],
-        line_grid=rrb.archetypes.LineGrid3D(visible=False),
-    )
-
-    # Create tabbed view that supports any number of cameras
-    view_2d: rrb.Tabs = create_tabbed_camera_view(parent_log_path, num_images)
-    if show_videos:
-        view_2d_videos: rrb.Grid = rrb.Grid(
-            contents=[
-                rrb.Spatial2DView(origin=f"{parent_log_path}/exo/camera_{i}/pinhole/video", name=f"Video {i + 1}")
-                for i in range(num_images)
-            ],
-            name="Videos Tab",
+def set_annotation_context(*, recording: rr.RecordingStream | None) -> None:
+    keypoint_infos: list[rr.AnnotationInfo] = [
+        rr.AnnotationInfo(id=id, label=name) for id, name in COCO_133_ID2NAME.items()
+    ]
+    class_descriptions: list[rr.ClassDescription] = []
+    for layer in (
+        Coco133AnnotationLayer.GT,
+        Coco133AnnotationLayer.RAW_2D,
+        Coco133AnnotationLayer.TRACKED_2D,
+        Coco133AnnotationLayer.PROJECTED_2D,
+        Coco133AnnotationLayer.OPTIMIZED_2D,
+    ):
+        label: str = COCO133_LAYER_LABELS[layer]
+        color: tuple[int, int, int] = COCO133_LAYER_COLORS[layer]
+        class_descriptions.append(
+            rr.ClassDescription(
+                info=rr.AnnotationInfo(id=int(layer), label=label, color=color),
+                keypoint_annotations=keypoint_infos,
+                keypoint_connections=COCO_133_LINKS,
+            )
         )
-        view_2d = rrb.Tabs(view_2d, view_2d_videos)
-
-    blueprint = rrb.Blueprint(rrb.Horizontal(contents=[view3d, view_2d], column_shares=[3, 2]), collapse_panels=True)
-    return blueprint
-
-
-def set_annotation_context() -> None:
     rr.log(
         "/",
-        rr.AnnotationContext(
-            [
-                rr.ClassDescription(
-                    info=rr.AnnotationInfo(id=0, label="Coco Wholebody", color=(0, 0, 255)),
-                    keypoint_annotations=[
-                        rr.AnnotationInfo(id=id, label=name) for id, name in COCO_133_ID2NAME.items()
-                    ],
-                    keypoint_connections=COCO_133_LINKS,
-                ),
-            ]
-        ),
+        rr.AnnotationContext(class_descriptions),
         static=True,
+        recording=recording,
     )
 
 
@@ -275,63 +217,51 @@ def frame_index_to_timestamp(frame_timestamps_ns: Int[ndarray, "num_frames"], fr
 def predict_kpts3d_from_calibrated_videos(
     exo_video_readers: MultiVideoReader,
     exo_cam_list: list[PinholeParameters],
+    pose_tracker: MultiviewBodyTracker,
+    top_half_mask: Bool[ndarray, "_"],
     shortest_timestamp: Int[ndarray, "num_frames"],
     parent_log_path: Path,
-    hand_kpt_detector: WilorHandKeypointDetector,
     max_frames: int | None = None,
-) -> list[Float32[ndarray, "num_kpts 4"]]:
-    upper_body_filter_idx = np.array([5, 6, 7, 8, 9, 10])
-    face_idx = np.arange(23, 91)
-    left_hand_idx = np.arange(91, 112)
-    right_hand_idx = np.arange(112, 133)
-    wb_upper_body_filter_idx = np.concatenate([upper_body_filter_idx, face_idx, left_hand_idx, right_hand_idx])
-
-    # Create a boolean mask for all rows
-    top_half_mask = np.isin(np.arange(133), wb_upper_body_filter_idx)
-    bbox_expansion_ratio: float = 0.2
-
-    pose_tracker = MultiviewBodyTracker(
-        MultiviewBodyTrackerConfig(
-            mode="wholebody",
-            backend="onnxruntime",
-            device="cuda",
-            filter_body_idxes=wb_upper_body_filter_idx,
-            cams_for_detection_idx=None,  # use all cameras
-            perform_tracking=True,
-            use_wilor=True,
-        )
-    )
-
+    recording: rr.RecordingStream | None = None,
+) -> list[Float32[ndarray, "n_kpts 4"]]:
     Pall: Float32[ndarray, "n_views 3 4"] = np.stack([cam.projection_matrix for cam in exo_cam_list]).astype(np.float32)
     exo_frame_timestamps_list: list[Int[ndarray, "num_frames"]] = [
         rr.AssetVideo(path=video_path).read_frame_timestamps_nanos() for video_path in exo_video_readers.video_paths
     ]
 
-    pbar = tqdm(
+    pbar: object = tqdm(
         shortest_timestamp,
         total=len(shortest_timestamp) if max_frames is None else min(len(shortest_timestamp), max_frames),
     )
-    conf_thresh: float = 0.7
-    mv_output: MVHistory = MVHistory()
     pbar_iter: Iterable[int] = cast(Iterable[int], pbar)
-    xyzc_list: list[Float32[ndarray, "num_kpts 4"]] = []
+    conf_thresh: float = pose_tracker.config.keypoint_threshold
+    mv_output: MVHistory = MVHistory()
+    xyzc_list: list[Float32[ndarray, "n_kpts 4"]] = []
+    gt_class_id: int = int(Coco133AnnotationLayer.GT)
     for ts_idx, timestamp in enumerate(pbar_iter):
         if max_frames is not None and ts_idx >= max_frames:
             break
+        # Anchor logging on a shared nanosecond timeline so 24 fps ego clips and 30 fps exo clips stay synchronized in the viewer.
         rr.set_time(timeline="video_time", duration=np.timedelta64(int(timestamp), "ns"))
+        # Convert the unified timestamp into per-camera frame indices to absorb fps drift across exo recordings.
         frame_indices: list[int] = [
             timestamp_to_frame_index(time_ns=int(timestamp), frame_timestamps_ns=frame_timestamps)
             for frame_timestamps in exo_frame_timestamps_list
         ]
-        bgr_list: list[UInt8[ndarray, "H W 3"]] = [
-            video_reader[frame_idx]
-            for video_reader, frame_idx in zip(exo_video_readers.video_readers, frame_indices, strict=True)
-        ]
+        bgr_list: list[UInt8[ndarray, "H W 3"]] = []
+        for video_reader, frame_idx in zip(exo_video_readers.video_readers, frame_indices, strict=True):
+            frame_raw: object = video_reader[frame_idx]
+            if frame_raw is None:
+                raise ValueError(f"Missing frame for index {frame_idx} in multi-view reader.")
+            frame_array: UInt8[ndarray, "H W 3"] = np.asarray(frame_raw, dtype=np.uint8)
+            if frame_array.ndim != 3 or frame_array.shape[2] != 3:
+                raise ValueError(f"Expected frame with shape (*, *, 3), got {frame_array.shape} for index {frame_idx}.")
+            bgr_list.append(frame_array)
         mv_output: MVHistory = pose_tracker(
             bgr_list=bgr_list,
             pinhole_list=exo_cam_list,
             pred_state=mv_output,
-            recording=None,
+            recording=recording,
         )
 
         xyzc_list.append(mv_output.xyzc_t if mv_output.xyzc_t is not None else np.full((133, 4), np.nan))
@@ -339,8 +269,8 @@ def predict_kpts3d_from_calibrated_videos(
         if mv_output.xyzc_t is None:
             continue
 
-        vis_xyz: Float32[ndarray, "num_kpts 3"] = mv_output.xyzc_t[:, :3].copy()
-        vis_scores_3d: Float32[ndarray, "num_kpts"] = mv_output.xyzc_t[:, 3].copy()  # noqa: UP037
+        vis_xyz: Float32[ndarray, "n_kpts 3"] = mv_output.xyzc_t[:, :3].copy()
+        vis_scores_3d: Float32[ndarray, "n_kpts"] = mv_output.xyzc_t[:, 3].copy()  # noqa: UP037
         # filter to only include the desired keypoints
         vis_xyz[~top_half_mask, :] = np.nan
         vis_scores_3d[~top_half_mask] = np.nan
@@ -348,102 +278,60 @@ def predict_kpts3d_from_calibrated_videos(
         vis_xyz[vis_scores_3d < conf_thresh, :] = np.nan
         vis_scores_3d[vis_scores_3d < conf_thresh] = np.nan
         # get hands idx and check their average confidence
-        left_hand_conf = vis_scores_3d[left_hand_idx].mean()
-        right_hand_conf = vis_scores_3d[right_hand_idx].mean()
+        left_hand_conf = vis_scores_3d[LEFT_HAND_IDX].mean()
+        right_hand_conf = vis_scores_3d[RIGHT_HAND_IDX].mean()
         # if either hand is below 0.6 confidence, remove all hand keypoints
         if left_hand_conf < conf_thresh:
-            vis_xyz[left_hand_idx, :] = np.nan
-            vis_scores_3d[left_hand_idx] = np.nan
+            vis_xyz[LEFT_HAND_IDX, :] = np.nan
+            vis_scores_3d[LEFT_HAND_IDX] = np.nan
         if right_hand_conf < conf_thresh:
-            vis_xyz[right_hand_idx, :] = np.nan
-            vis_scores_3d[right_hand_idx] = np.nan
+            vis_xyz[RIGHT_HAND_IDX, :] = np.nan
+            vis_scores_3d[RIGHT_HAND_IDX] = np.nan
 
-        confidence_rgb_stack: UInt8[ndarray, "1 num_kpts 3"] = confidence_scores_to_rgb(
+        confidence_rgb_stack: UInt8[ndarray, "1 n_kpts 3"] = confidence_scores_to_rgb(
             vis_scores_3d[np.newaxis, :, np.newaxis]
         )
-        confidence_rgb: UInt8[ndarray, "num_kpts 3"] = confidence_rgb_stack[0]
+        confidence_rgb: UInt8[ndarray, "n_kpts 3"] = confidence_rgb_stack[0]
 
         rr.log(
-            f"{parent_log_path}/wholebody",
+            str(parent_log_path / "gt" / "coco133_xyz"),
             Points3DWithConfidence(
                 positions=vis_xyz,
                 confidences=vis_scores_3d,
-                class_ids=0,
+                class_ids=gt_class_id,
                 keypoint_ids=COCO_133_IDS,
                 show_labels=False,
                 colors=confidence_rgb,
             ),
-            recording=None,
+            recording=recording,
         )
         # project 3d keypoints into 2d and log
-        xyz_hom: Float32[ndarray, "num_kpts 4"] = np.concatenate(
+        xyz_hom: Float32[ndarray, "n_kpts 4"] = np.concatenate(
             [vis_xyz, np.ones((vis_xyz.shape[0], 1), dtype=np.float32)], axis=1
         )
-        xyz_hom_stack: Float32[ndarray, "1 num_kpts 4"] = np.stack([xyz_hom], axis=0)
+        xyz_hom_stack: Float32[ndarray, "1 n_kpts 4"] = np.stack([xyz_hom], axis=0)
         uv_exo_stack: Float[ndarray, "1 n_views 133 2"] = proj_3d_vectorized(xyz_hom=xyz_hom_stack, P=Pall)
         uv_exo: Float32[ndarray, "n_views 133 2"] = uv_exo_stack[0]
-        for view_idx, (uv_view, exo_cam) in enumerate(zip(uv_exo, exo_cam_list, strict=True)):
+        for uv_view, exo_cam in zip(uv_exo, exo_cam_list, strict=True):
             uv: Float32[ndarray, "133 2"] = uv_view.astype(np.float32, copy=True)
             confidences_view: Float32[ndarray, "133"] = vis_scores_3d.astype(np.float32, copy=True)
 
-            left_hand_uv: Float32[ndarray, "21 2"] = uv[left_hand_idx, :]
-            right_hand_uv: Float32[ndarray, "21 2"] = uv[right_hand_idx, :]
-
-            rgb_hw3: UInt8[ndarray, "H W 3"] = bgr_list[view_idx][..., ::-1]
-
-            left_bbox: Float32[ndarray, "4"] | None = compute_square_bbox(
-                left_hand_uv,
-                intrinsics=exo_cam.intrinsics,
-                expansion_ratio=bbox_expansion_ratio,
-            )
-            if left_bbox is not None:
-                xyxy_left: Float32[ndarray, "1 4"] = left_bbox[np.newaxis, :]
-                wilor_left: FinalWilorPred = hand_kpt_detector(
-                    rgb_hw3=rgb_hw3,
-                    xyxy=xyxy_left,
-                    handedness="left",
-                )
-                left_uv_pred: Float32[ndarray, "1 21 2"] = wilor_left.pred_keypoints_2d.astype(np.float32, copy=False)
-                uv[left_hand_idx, :] = left_uv_pred[0]
-                left_conf_pred: Float32[ndarray, "1 21"] = wilor_left.confidence_2d.astype(np.float32, copy=False)
-                confidences_view[left_hand_idx] = left_conf_pred[0]
-
-            right_bbox: Float32[ndarray, "4"] | None = compute_square_bbox(
-                right_hand_uv,
-                intrinsics=exo_cam.intrinsics,
-                expansion_ratio=bbox_expansion_ratio,
-            )
-            if right_bbox is not None:
-                xyxy_right: Float32[ndarray, "1 4"] = right_bbox[np.newaxis, :]
-                wilor_right: FinalWilorPred = hand_kpt_detector(
-                    rgb_hw3=rgb_hw3,
-                    xyxy=xyxy_right,
-                    handedness="right",
-                )
-                right_uv_pred: Float32[ndarray, "1 21 2"] = wilor_right.pred_keypoints_2d.astype(np.float32, copy=False)
-                uv[right_hand_idx, :] = right_uv_pred[0]
-                right_conf_pred: Float32[ndarray, "1 21"] = wilor_right.confidence_2d.astype(np.float32, copy=False)
-                confidences_view[right_hand_idx] = right_conf_pred[0]
-
             pinhole_log_path = parent_log_path / "exo" / exo_cam.name / "pinhole"
-            # rr.log(
-            #     f"{pinhole_log_path}/image", rr.Image(bgr_list[view_idx], color_model=rr.ColorModel.BGR).compress(70)
-            # )
-            confidence_rgb_view_stack: UInt8[ndarray, "1 num_kpts 3"] = confidence_scores_to_rgb(
+            confidence_rgb_view_stack: UInt8[ndarray, "1 n_kpts 3"] = confidence_scores_to_rgb(
                 confidences_view[np.newaxis, :, np.newaxis]
             )
-            confidence_rgb_view: UInt8[ndarray, "num_kpts 3"] = confidence_rgb_view_stack[0]
+            confidence_rgb_view: UInt8[ndarray, "n_kpts 3"] = confidence_rgb_view_stack[0]
             rr.log(
-                f"{pinhole_log_path}/video/keypoints",
+                str(pinhole_log_path / "gt" / "coco133_uv"),
                 Points2DWithConfidence(
                     positions=uv,
                     confidences=confidences_view,
-                    class_ids=0,
+                    class_ids=gt_class_id,
                     keypoint_ids=COCO_133_IDS,
                     show_labels=False,
                     colors=confidence_rgb_view,
                 ),
-                recording=None,
+                recording=recording,
             )
         # Mask out keypoints not in the top half to avoid visualizing irrelevant or missing data.
         mv_output.xyzc_t[~top_half_mask, :] = np.nan
@@ -459,6 +347,8 @@ class RRDPipelineConfig:
     """Dataset factory capable of producing an annotated ``BaseExoEgoSequence``."""
     calib_confg: MultiViewCalibratorConfig = field(default_factory=MultiViewCalibratorConfig)
     """Parameters forwarded to the multi-view calibrator."""
+    tracker_config: MultiviewBodyTrackerConfig = field(default_factory=MultiviewBodyTrackerConfig)
+    """Configuration for the multiview body tracker."""
     calib_ts_nano: int | None = None
     """Optional nanosecond timestamp used to select calibration frames for cameras and MANO."""
     max_frames: int | None = None
@@ -466,77 +356,154 @@ class RRDPipelineConfig:
 
 
 def main(config: RRDPipelineConfig) -> None:
+    """Preserve the Tyro CLI entry point while delegating to the reusable pipeline helper."""
+    run_full_exoego_pipeline(config=config, recording=None)
+
+
+def run_full_exoego_pipeline(config: RRDPipelineConfig, recording: rr.RecordingStream | None = None) -> None:
+    """Execute the Exo/Ego pipeline; split from main so UI backends can supply explicit Rerun recordings."""
     parent_log_path = Path("world")
     timeline = "video_time"
+    projected_variant: str = COCO133_PREDICTION_LAYER_TO_PATH[Coco133AnnotationLayer.PROJECTED_2D]
+    projected_class_id: int = int(Coco133AnnotationLayer.PROJECTED_2D)
 
     ###################
     # 0. Parse inputs #
     ###################
-
     exoego_sequence: BaseExoEgoSequence = config.dataset.setup()  # one-liner
-    rr.log("/", exoego_sequence.world_coordinate_system, static=True)
-    set_annotation_context()
+    rr.log("/", exoego_sequence.world_coordinate_system, static=True, recording=recording)
+    set_annotation_context(recording=recording)
 
     parent_log_path = Path("world")
     timeline: str = "video_time"
 
-    scene_setup_result: SceneSetupResult = setup_scene(exoego_sequence, parent_log_path, timeline)
+    scene_setup_result: SceneSetupResult = setup_scene(exoego_sequence, parent_log_path, timeline, recording=recording)
     log_paths: LogPaths = scene_setup_result.log_paths
     shortest_timestamp: Int[ndarray, "n_frames"] = scene_setup_result.shortest_timestamp
 
-    blueprint: rrb.Blueprint = create_blueprint(
-        exo_view_roots=log_paths.exo_view_roots,
-        ego_view_roots=log_paths.ego_view_roots,  # only show rgb ego cameras for now
+    exo_video_log_paths_opt: list[Path] | None = log_paths.exo_video_log_paths
+    if exo_video_log_paths_opt is None:
+        raise ValueError("Scene setup must return exo video log paths.")
+    ego_video_log_paths_opt: list[Path] | None = log_paths.ego_video_log_paths
+    if ego_video_log_paths_opt is None:
+        raise ValueError("Scene setup must return ego video log paths.")
+
+    exo_video_log_paths: list[Path] = list(exo_video_log_paths_opt)
+    ego_video_log_paths: list[Path] = list(ego_video_log_paths_opt)
+
+    final_container: rrb.ContainerLike = create_view_container(
+        exo_video_log_paths=exo_video_log_paths,
+        ego_video_log_paths=ego_video_log_paths,
     )
-    # # show images instead of videos for now so /world/ego/camera_x/pinhole/image
-    # img_exo_paths: list[Path] = [Path(p.parent.parent) / "pinhole" / "image" for p in log_paths.exo_view_roots]
-    # img_ego_paths: list[Path] = [Path(p.parent.parent) / "pinhole" / "image" for p in log_paths.ego_view_roots]
-    # blueprint: rrb.Blueprint = create_blueprint(
-    #     exo_view_roots=img_exo_paths,
-    #     ego_view_roots=img_ego_paths,
-    # )
-    rr.send_blueprint(blueprint)
+    blueprint = rrb.Blueprint(
+        final_container,
+        collapse_panels=True,
+    )
+    # Blueprint routing still relies on global stream; callers providing a recording
+    # should ensure it is set active before invoking this pipeline.
+    rr.send_blueprint(blueprint, recording=recording)
 
-    exo_mv_reader: MultiVideoReader = exoego_sequence.exo_sequence.exo_video_readers
-    ego_mv_reader: MultiVideoReader = exoego_sequence.ego_sequence.ego_video_readers
-    bgr_list_exo: list[UInt8[ndarray, "H W 3"]] = exo_mv_reader[0]
-    bgr_list_ego: list[UInt8[ndarray, "H W 3"]] = ego_mv_reader[0]
-    rgb_list_exo: list[UInt8[ndarray, "H W 3"]] = [cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB) for bgr in bgr_list_exo]
-    rgb_list_ego: list[UInt8[ndarray, "H W 3"]] = [cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB) for bgr in bgr_list_ego]
-    rgb_list: list[UInt8[ndarray, "H W 3"]] = rgb_list_exo + rgb_list_ego
+    exo_sequence_obj: object = exoego_sequence.exo_sequence
+    if exo_sequence_obj is None:
+        raise ValueError("Dataset setup failed to provide an exo sequence.")
+    ego_sequence_obj: object = exoego_sequence.ego_sequence
+    if ego_sequence_obj is None:
+        raise ValueError("Dataset setup failed to provide an ego sequence.")
 
-    input_log_paths: list[Path] = log_paths.exo_view_roots + log_paths.ego_view_roots
+    exo_sequence: BaseExoSequence = cast(BaseExoSequence, exo_sequence_obj)
+    ego_sequence: BaseEgoSequence = cast(BaseEgoSequence, ego_sequence_obj)
+
+    exo_mv_reader: MultiVideoReader = exo_sequence.exo_video_readers
+    ego_mv_reader: MultiVideoReader = ego_sequence.ego_video_readers
+    if shortest_timestamp.size == 0:
+        raise ValueError("Scene setup returned no timestamps to derive calibration frame.")
+
+    ##############################################
+    # 1. Load calibration frames from all videos #
+    ##############################################
+    calib_timestamp_ns: int = int(shortest_timestamp[-1]) if config.calib_ts_nano is None else int(config.calib_ts_nano)
+    ego_camera_names: list[str] = [path.parent.parent.name for path in ego_video_log_paths]
+    ego_rgb_indices: list[int] = [
+        idx for idx, camera_name in enumerate(ego_camera_names) if "rgb" in camera_name.lower()
+    ]
+    ego_rgb_index_set: set[int] = set(ego_rgb_indices)
+    ego_rgb_video_log_paths: list[Path] = [ego_video_log_paths[idx] for idx in ego_rgb_indices]
+
+    # load the exo frames first
+    # Need to get ts list as exo and ego can have different fps and drift
+    exo_frame_timestamp_list: list[Int[ndarray, "num_frames"]] = [
+        rr.AssetVideo(path=video_path).read_frame_timestamps_nanos() for video_path in exo_mv_reader.video_paths
+    ]
+    exo_calib_indices: list[int] = [
+        timestamp_to_frame_index(time_ns=calib_timestamp_ns, frame_timestamps_ns=frame_timestamps)
+        for frame_timestamps in exo_frame_timestamp_list
+    ]
+    bgr_list_exo: list[UInt8[ndarray, "H W 3"]] = []
+    for reader, frame_idx in zip(exo_mv_reader.video_readers, exo_calib_indices, strict=True):
+        frame_obj: Any = reader[frame_idx]
+        if frame_obj is None:
+            raise ValueError(f"Missing exo frame at index {frame_idx}.")
+        frame_array_untyped: np.ndarray = np.asarray(frame_obj, dtype=np.uint8)
+        frame_array: UInt8[ndarray, "H W 3"] = frame_array_untyped
+        if frame_array.ndim != 3 or frame_array.shape[2] != 3:
+            raise ValueError(f"Expected BGR frame with shape (*, *, 3), got {frame_array.shape} at index {frame_idx}.")
+        bgr_list_exo.append(frame_array)
+
+    # ego frames next, but only the rgb cameras
+    ego_frame_timestamp_list: list[Int[ndarray, "num_frames"]] = [
+        rr.AssetVideo(path=video_path).read_frame_timestamps_nanos() for video_path in ego_mv_reader.video_paths
+    ]
+    ego_calib_indices: list[int] = [
+        timestamp_to_frame_index(time_ns=calib_timestamp_ns, frame_timestamps_ns=frame_timestamps)
+        for frame_timestamps in ego_frame_timestamp_list
+    ]
+    bgr_list_ego: list[UInt8[ndarray, "H W 3"]] = []
+    if ego_rgb_indices:
+        for camera_idx, reader in enumerate(ego_mv_reader.video_readers):
+            if camera_idx not in ego_rgb_index_set:
+                continue
+            frame_idx: int = ego_calib_indices[camera_idx]
+            frame_obj: Any = reader[frame_idx]
+            if frame_obj is None:
+                raise ValueError(f"Missing ego frame at index {frame_idx} for camera {camera_idx}.")
+            frame_array_untyped: np.ndarray = np.asarray(frame_obj, dtype=np.uint8)
+            frame_array: UInt8[ndarray, "H W 3"] = frame_array_untyped
+            if frame_array.ndim != 3 or frame_array.shape[2] != 3:
+                raise ValueError(
+                    f"Expected BGR frame with shape (*, *, 3), got {frame_array.shape} at index {frame_idx}."
+                )
+            bgr_list_ego.append(frame_array)
+
+    # convert all to rgb
+    rgb_list_exo: list[UInt8[ndarray, "H W 3"]] = []
+    for bgr in bgr_list_exo:
+        rgb_frame: UInt8[ndarray, "H W 3"] = np.asarray(cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB), dtype=np.uint8)
+        if rgb_frame.ndim != 3 or rgb_frame.shape[2] != 3:
+            raise ValueError(f"Expected RGB frame with shape (*, *, 3), got {rgb_frame.shape}.")
+        rgb_list_exo.append(rgb_frame)
+
+    rgb_list_ego: list[UInt8[ndarray, "H W 3"]] = []
+    for bgr in bgr_list_ego:
+        rgb_frame: UInt8[ndarray, "H W 3"] = np.asarray(cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB), dtype=np.uint8)
+        if rgb_frame.ndim != 3 or rgb_frame.shape[2] != 3:
+            raise ValueError(f"Expected RGB frame with shape (*, *, 3), got {rgb_frame.shape}.")
+        rgb_list_ego.append(rgb_frame)
+
+    rgb_list: list[UInt8[ndarray, "H W 3"]] = [*rgb_list_exo, *rgb_list_ego]
+
+    input_log_paths: list[Path] = [*exo_video_log_paths, *ego_rgb_video_log_paths]
     exo_ts: Int[ndarray, "num_frames"] = shortest_timestamp
-
-    start: float = timer()
-
-    # # Create blueprint for visualization in rerun
-    # blueprint: rrb.Blueprint = create_blueprint(
-    #     parent_log_path=parent_log_path, num_images=len(rgb_list), show_videos=config.videos_dir is not None
-    # )
-    # rr.send_blueprint(blueprint=blueprint)
-    # rr.log(f"{parent_log_path}", rr.ViewCoordinates.RFU, static=True)
-    rr.set_time(timeline=timeline, duration=np.timedelta64(0, "ns"))
-    hand_kpt_detector: WilorHandKeypointDetector = WilorHandKeypointDetector(
-        cfg=HandKeypointDetectorConfig(verbose=False)
-    )
 
     ############################
     # 2. Calibrate Exo Cameras #
     ############################
-    # for log_path, rgb in zip(log_paths.exo_view_roots, rgb_list_exo, strict=True):
-    #     rr.log(
-    #         f"{log_path}/pinhole/image",
-    #         rr.Image(rgb, color_model=rr.ColorModel.RGB),
-    #         static=True,
-    #     )
+    start: float = timer()
 
-    # for idx, rgb in enumerate(rgb_list_ego):
-    #     rr.log(
-    #         f"{parent_log_path}/ego/camera_{idx}/pinhole/image",
-    #         rr.Image(rgb, color_model=rr.ColorModel.RGB),
-    #         static=True,
-    #     )
+    rr.set_time(timeline=timeline, duration=np.timedelta64(0, "ns"), recording=recording)
+    hand_kpt_detector: WilorHandKeypointDetector = WilorHandKeypointDetector(
+        cfg=HandKeypointDetectorConfig(verbose=False)
+    )
+
     mv_calibrator: MultiViewCalibrator = MultiViewCalibrator(parent_log_path=parent_log_path, config=config.calib_confg)
     mv_calib_results: MVCalibResults = mv_calibrator(rgb_list=rgb_list)
 
@@ -544,14 +511,10 @@ def main(config: RRDPipelineConfig) -> None:
     exo_pinhole_param_list: list[PinholeParameters] = pinhole_param_list[: len(rgb_list_exo)]
     ego_pinhole_param_list: list[PinholeParameters] = pinhole_param_list[len(rgb_list_exo) :]
     # replace cam names with those from the dataset for easier identification
-    for cam, log_path in zip(exo_pinhole_param_list, log_paths.exo_view_roots, strict=True):
-        print(cam.name)
+    for cam, log_path in zip(exo_pinhole_param_list, exo_video_log_paths, strict=True):
         cam.name = log_path.parent.parent.name
-        print(cam.name)
-    for cam, log_path in zip(ego_pinhole_param_list, log_paths.ego_view_roots, strict=True):
-        print(cam.name)
+    for cam, log_path in zip(ego_pinhole_param_list, ego_rgb_video_log_paths, strict=True):
         cam.name = log_path.parent.parent.name
-        print(cam.name)
 
     assert len(exo_pinhole_param_list) == len(rgb_list_exo)
     assert len(ego_pinhole_param_list) == len(rgb_list_ego)
@@ -569,15 +532,16 @@ def main(config: RRDPipelineConfig) -> None:
     filtered_colors: Float[ndarray, "final_points 3"] = np.asarray(pcd_ds.colors, dtype=np.float32)
 
     rr.log(
-        f"{parent_log_path}/pointcloud",
+        str(parent_log_path / "gt" / "env_pointcloud"),
         rr.Points3D(
             filtered_points,
             colors=filtered_colors,
         ),
         static=True,
+        recording=recording,
     )
     #####################################
-    # 4. Fuse Depths into TSDF Mesh     #
+    # 3. Fuse Depths into TSDF Mesh     #
     #####################################
     if mv_calib_results.depth_list and mv_calib_results.pinhole_param_list:
         depth_fuser = Open3DScaleInvariantFuser(grid_resolution=512)
@@ -602,7 +566,7 @@ def main(config: RRDPipelineConfig) -> None:
         vertex_colors: Float32[ndarray, "num_vertices 3"] = np.asarray(gt_mesh.vertex_colors, dtype=np.float32)
 
         rr.log(
-            str(parent_log_path / "gt_mesh"),
+            str(parent_log_path / "gt" / "env_mesh"),
             rr.Mesh3D(
                 vertex_positions=vertex_positions,
                 triangle_indices=triangle_indices,
@@ -610,79 +574,108 @@ def main(config: RRDPipelineConfig) -> None:
                 vertex_colors=vertex_colors,
             ),
             static=True,
+            recording=recording,
         )
 
-    # 6. Predict keypoints from calibrated video frames
     if exo_mv_reader is not None and exo_ts is not None:
-        xyzc_list: list[Float32[ndarray, "num_kpts 4"]] = predict_kpts3d_from_calibrated_videos(
+        #########################################################
+        # 5. Predict exo keypoints from calibrated video frames #
+        #########################################################
+        upper_body_filter_idx: Int[ndarray, "_"] = np.array([5, 6, 7, 8, 9, 10])
+        wb_upper_body_filter_idx: Int[ndarray, "_"] = np.concatenate(
+            [upper_body_filter_idx, FACE_IDX, LEFT_HAND_IDX, RIGHT_HAND_IDX]
+        )
+        # Create a boolean mask for all rows
+        top_half_mask: Bool[ndarray, "_"] = np.isin(np.arange(133), wb_upper_body_filter_idx)
+        pose_tracker = MultiviewBodyTracker(config.tracker_config, filter_body_idxes=wb_upper_body_filter_idx)
+
+        xyzc_list: list[Float32[ndarray, "n_kpts 4"]] = predict_kpts3d_from_calibrated_videos(
             exo_video_readers=exo_mv_reader,
             exo_cam_list=exo_pinhole_param_list,
+            pose_tracker=pose_tracker,
+            top_half_mask=top_half_mask,
             shortest_timestamp=exo_ts,
             parent_log_path=parent_log_path,
-            hand_kpt_detector=hand_kpt_detector,
             max_frames=config.max_frames,
+            recording=recording,
         )
-        upper_body_filter_idx = np.array([5, 6, 7, 8, 9, 10])
-        face_idx = np.arange(23, 91)
-        left_hand_idx = np.arange(91, 112)
-        right_hand_idx = np.arange(112, 133)
-        wb_upper_body_filter_idx = np.concatenate([upper_body_filter_idx, face_idx, left_hand_idx, right_hand_idx])
-        top_half_mask = np.isin(np.arange(133), wb_upper_body_filter_idx)
         bbox_expansion_percentage: float = 0.25
-        # project into ego views
-        if len(xyzc_list) > 0:
-            exo_fps: float = float(exo_mv_reader.video_readers[0].fps) if exo_mv_reader.video_readers else 0.0
-            ego_fps: float = float(ego_mv_reader.video_readers[0].fps) if ego_mv_reader.video_readers else 0.0
-            ego_frame_count: int = len(ego_mv_reader)
-            frame_ratio: float = (
-                ego_fps / exo_fps
-                if exo_fps > 0.0 and ego_fps > 0.0
-                else (ego_frame_count / float(len(xyzc_list)) if len(xyzc_list) > 0 else 1.0)
-            )
-            frame_ratio = 1.0 if not np.isfinite(frame_ratio) or frame_ratio <= 0.0 else frame_ratio
+        keypoint_threshold: float = pose_tracker.config.keypoint_threshold
+        #########################################################
+        # 6. Predict ego keypoints from calibrated video frames #
+        #########################################################
+        if len(xyzc_list) > 0 and len(ego_pinhole_param_list) > 0:
             Pall_ego: Float32[ndarray, "n_views 3 4"] = np.stack(
                 [cam.projection_matrix for cam in ego_pinhole_param_list]
             ).astype(np.float32)
+
             for idx, xyzc in enumerate(xyzc_list):
-                rr.set_time(timeline=timeline, duration=np.timedelta64(int(exo_ts[idx]), "ns"))
-                # if ego_frame_count == 0:
-                #     continue
-                # ego_idx_float: float = idx * frame_ratio
-                # ego_frame_idx: int = min(int(round(ego_idx_float)), ego_frame_count - 1)
-                bgr_list_ego: list[UInt8[ndarray, "H W 3"]] = ego_mv_reader[idx]
+                rr.set_time(timeline=timeline, duration=np.timedelta64(int(exo_ts[idx]), "ns"), recording=recording)
+                bgr_list_ego: list[UInt8[ndarray, "H W 3"]] = []
+                for camera_idx, frame in enumerate(ego_mv_reader[idx]):
+                    if camera_idx not in ego_rgb_index_set:
+                        continue
+                    if frame is None:
+                        raise ValueError(f"Missing ego frame at batch index {camera_idx} for timestamp index {idx}.")
+                    frame_array: UInt8[ndarray, "H W 3"] = np.asarray(frame, dtype=np.uint8)
+                    if frame_array.ndim != 3 or frame_array.shape[2] != 3:
+                        raise ValueError(
+                            f"Expected BGR frame with shape (*, *, 3), got {frame_array.shape} at index {camera_idx}."
+                        )
+                    bgr_list_ego.append(frame_array)
+
+                if len(bgr_list_ego) != len(ego_pinhole_param_list):
+                    msg = (
+                        "Filtered ego frame count does not match calibrated ego cameras: "
+                        f"{len(bgr_list_ego)} vs {len(ego_pinhole_param_list)}."
+                    )
+                    raise ValueError(msg)
 
                 if xyzc is None:
                     continue
-                vis_xyz: Float32[ndarray, "num_kpts 3"] = xyzc[:, :3].copy()
-                vis_scores_3d: Float32[ndarray, "num_kpts"] = xyzc[:, 3].copy()  # noqa: UP037
+                vis_xyz: Float32[ndarray, "n_kpts=133 3"] = xyzc[:, :3].copy()
+                vis_scores_3d: Float32[ndarray, "n_kpts=133"] = xyzc[:, 3].copy()  # noqa: UP037
                 # filter to only include the desired keypoints
                 vis_xyz[~top_half_mask, :] = np.nan
                 vis_scores_3d[~top_half_mask] = np.nan
                 # filter out low-confidence keypoints
-                vis_xyz[vis_scores_3d < 0.7, :] = np.nan
-                vis_scores_3d[vis_scores_3d < 0.7] = np.nan
+                vis_xyz[vis_scores_3d < keypoint_threshold, :] = np.nan
+                vis_scores_3d[vis_scores_3d < keypoint_threshold] = np.nan
 
-                # project 3d keypoints into 2d and log
-                xyz_hom: Float32[ndarray, "num_kpts 4"] = np.concatenate(
+                # project 3d keypoints into 2d
+                xyz_hom: Float32[ndarray, "n_kpts=133 4"] = np.concatenate(
                     [vis_xyz, np.ones((vis_xyz.shape[0], 1), dtype=np.float32)], axis=1
                 )
-                xyz_hom_stack: Float32[ndarray, "1 num_kpts 4"] = np.stack([xyz_hom], axis=0)
-                uv_ego_stack: Float[ndarray, "1 n_views 133 2"] = proj_3d_vectorized(xyz_hom=xyz_hom_stack, P=Pall_ego)
-                uv_ego: Float32[ndarray, "n_views 133 2"] = uv_ego_stack[0]
+                xyz_hom_stack: Float32[ndarray, "n_frames=1 n_kpts=133 4"] = np.stack([xyz_hom], axis=0)
+                uv_ego_stack: Float[ndarray, "n_frames=1 n_views n_kpts=133 2"] = proj_3d_vectorized(
+                    xyz_hom=xyz_hom_stack, P=Pall_ego
+                )
+                uv_ego: Float32[ndarray, "n_views n_kpts=133 2"] = uv_ego_stack[0]
 
                 for view_idx, (uv_view, ego_cam) in enumerate(zip(uv_ego, ego_pinhole_param_list, strict=True)):
                     pinhole_log_path: Path = parent_log_path / "ego" / ego_cam.name / "pinhole"
-                    uv: Float32[ndarray, "133 2"] = uv_view.astype(np.float32, copy=True)
-                    # filter out keypoints that are behind the camera
-                    uv[vis_xyz[:, 2] > 0, :] = np.nan
+                    uv: Float32[ndarray, "n_kpts=133 2"] = uv_view.astype(np.float32, copy=True)
+                    projection_matrix: Float32[ndarray, "3 4"] = ego_cam.projection_matrix.astype(
+                        np.float32, copy=False
+                    )
+                    homog_cam: Float32[ndarray, "n_kpts=133 3"] = np.einsum("ij,nj->ni", projection_matrix, xyz_hom)
+                    depth_cam: Float32[ndarray, "n_kpts=133"] = homog_cam[:, 2]
+                    # Reject keypoints with non-positive homogeneous depth (behind the camera).
+                    invalid_depth_mask: Bool[ndarray, "n_kpts=133"] = np.logical_or(
+                        ~np.isfinite(depth_cam),
+                        depth_cam <= 0.0,
+                    )
+                    uv[invalid_depth_mask, :] = np.nan
                     # filter out keypoints that are out of bounds
                     uv = filter_out_of_bounds_keypoints(uv, ego_cam, margin_percentage=0.0)
+                    invalid_uv_mask: Bool[ndarray, "n_kpts=133"] = np.any(~np.isfinite(uv), axis=1)
 
-                    confidences_view: Float32[ndarray, "133"] = vis_scores_3d.astype(np.float32, copy=True)
+                    confidences_view: Float32[ndarray, "n_kpts=133"] = vis_scores_3d.astype(np.float32, copy=True)
+                    confidences_view[invalid_uv_mask] = np.nan
                     rgb_hw3: UInt8[ndarray, "H W 3"] = bgr_list_ego[view_idx][..., ::-1]
 
                     left_bbox_infer: Float32[ndarray, "4"] | None = compute_square_bbox(
-                        uv[left_hand_idx, :],
+                        uv[LEFT_HAND_IDX, :],
                         intrinsics=ego_cam.intrinsics,
                         expansion_ratio=bbox_expansion_percentage,
                     )
@@ -696,14 +689,10 @@ def main(config: RRDPipelineConfig) -> None:
                         left_uv_pred: Float32[ndarray, "1 21 2"] = wilor_left.pred_keypoints_2d.astype(
                             np.float32, copy=False
                         )
-                        uv[left_hand_idx, :] = left_uv_pred[0]
-                        left_conf_pred: Float32[ndarray, "1 21"] = wilor_left.confidence_2d.astype(
-                            np.float32, copy=False
-                        )
-                        confidences_view[left_hand_idx] = left_conf_pred[0]
+                        uv[LEFT_HAND_IDX, :] = left_uv_pred[0]
 
                     right_bbox_infer: Float32[ndarray, "4"] | None = compute_square_bbox(
-                        uv[right_hand_idx, :],
+                        uv[RIGHT_HAND_IDX, :],
                         intrinsics=ego_cam.intrinsics,
                         expansion_ratio=bbox_expansion_percentage,
                     )
@@ -717,16 +706,10 @@ def main(config: RRDPipelineConfig) -> None:
                         right_uv_pred: Float32[ndarray, "1 21 2"] = wilor_right.pred_keypoints_2d.astype(
                             np.float32, copy=False
                         )
-                        uv[right_hand_idx, :] = right_uv_pred[0]
-                        right_conf_pred: Float32[ndarray, "1 21"] = wilor_right.confidence_2d.astype(
-                            np.float32, copy=False
-                        )
-                        confidences_view[right_hand_idx] = right_conf_pred[0]
-
-                    uv = filter_out_of_bounds_keypoints(uv, ego_cam, margin_percentage=0.0)
+                        uv[RIGHT_HAND_IDX, :] = right_uv_pred[0]
 
                     left_bbox_log: Float32[ndarray, "4"] | None = compute_square_bbox(
-                        uv[left_hand_idx, :],
+                        uv[LEFT_HAND_IDX, :],
                         intrinsics=ego_cam.intrinsics,
                         expansion_ratio=bbox_expansion_percentage,
                     )
@@ -735,13 +718,17 @@ def main(config: RRDPipelineConfig) -> None:
                         rr.log(
                             f"{pinhole_log_path}/video/left_hand_bbox",
                             rr.Boxes2D(array=lh_xyxy, array_format=rr.Box2DFormat.XYXY),
-                            recording=None,
+                            recording=recording,
                         )
                     else:
-                        rr.log(f"{pinhole_log_path}/video/left_hand_bbox", rr.Clear(recursive=True))
+                        rr.log(
+                            f"{pinhole_log_path}/video/left_hand_bbox",
+                            rr.Clear(recursive=True),
+                            recording=recording,
+                        )
 
                     right_bbox_log: Float32[ndarray, "4"] | None = compute_square_bbox(
-                        uv[right_hand_idx, :],
+                        uv[RIGHT_HAND_IDX, :],
                         intrinsics=ego_cam.intrinsics,
                         expansion_ratio=bbox_expansion_percentage,
                     )
@@ -750,31 +737,30 @@ def main(config: RRDPipelineConfig) -> None:
                         rr.log(
                             f"{pinhole_log_path}/video/right_hand_bbox",
                             rr.Boxes2D(array=rh_xyxy, array_format=rr.Box2DFormat.XYXY),
-                            recording=None,
+                            recording=recording,
                         )
                     else:
-                        rr.log(f"{pinhole_log_path}/video/right_hand_bbox", rr.Clear(recursive=True))
+                        rr.log(
+                            f"{pinhole_log_path}/video/right_hand_bbox",
+                            rr.Clear(recursive=True),
+                            recording=recording,
+                        )
 
-                    # rr.log(
-                    #     f"{pinhole_log_path}/image",
-                    #     rr.Image(bgr_list_ego[view_idx], color_model=rr.ColorModel.BGR).compress(70),
-                    # )
-
-                    confidence_rgb_view_stack: UInt8[ndarray, "1 num_kpts 3"] = confidence_scores_to_rgb(
+                    confidence_rgb_view_stack: UInt8[ndarray, "1 n_kpts 3"] = confidence_scores_to_rgb(
                         confidences_view[np.newaxis, :, np.newaxis]
                     )
-                    confidence_rgb_view: UInt8[ndarray, "num_kpts 3"] = confidence_rgb_view_stack[0]
+                    confidence_rgb_view: UInt8[ndarray, "n_kpts 3"] = confidence_rgb_view_stack[0]
                     rr.log(
-                        f"{pinhole_log_path}/video/keypoints",
+                        str(pinhole_log_path / "pred" / "coco133_uv" / projected_variant),
                         Points2DWithConfidence(
                             positions=uv,
                             confidences=confidences_view,
-                            class_ids=0,
+                            class_ids=projected_class_id,
                             keypoint_ids=COCO_133_IDS,
                             show_labels=False,
                             colors=confidence_rgb_view,
                         ),
-                        recording=None,
+                        recording=recording,
                     )
 
     print(f"Inference completed in {timer() - start:.2f} seconds")

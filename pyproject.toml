@@ -8,6 +8,7 @@ dependencies = [
     "mmcv-lite>=2.2.0,<2.3",
     "build>=1.2.2.post1,<2",
     "decord>=0.6.0,<0.7",
+    "gradio==5.33.1",
     "gradio-rerun>=0.25.0",
     "kornia>=0.8.1,<0.9",
     "onnxruntime-gpu>=1.22.0,<2",
@@ -62,6 +63,17 @@ cmd = """
 description = "Runs Gradio frontend for person annotation"
 depends-on = ["_download-minicoco-sample"]
 
+[tool.pixi.tasks.exoego-label-app]
+cmd = """
+    python tools/app_label.py
+    """
+description = "Runs Gradio frontend for exoego annotation"
+
+[tool.pixi.tasks.cli-full-exoego]
+cmd = """
+    pixi run python tools/run_exoego_full.py rrd --rrd-path /mnt/8tb/data/exoego-self-collected/adil/2025-10-26/48109c5e-5cf2-43f8-8579-eca3d8acfa52/48109c5e-5cf2-43f8-8579-eca3d8acfa52.rrd 
+"""
+description = "Runs full exoego pipeline from CLI"
 [tool.pixi.tasks.dev-app]
 cmd = """
     gradio tools/gradio_app_singleview.py
@@ -120,6 +132,7 @@ vggt = { git = "https://github.com/pablovela5620/vggt.git", rev = "5ed6ec88a951f
 moge = { git = "https://github.com/microsoft/MoGe.git" }
 sam-2 = { git = "https://github.com/facebookresearch/segment-anything-2.git", rev = "2b90b9f5ceec907a1c18123530e92e794ad901a4" }
 wilor-nano = { git = "https://github.com/pablovela5620/wilor-nano.git", rev = "70d01f333960113f825d2f7994a85fce5c51d61a" }
+monopriors = { git = "https://github.com/pablovela5620/monoprior.git", rev = "f887b77a3ba006b8e52e3fbf9cd85f90985ac54c" }
 
 
 [tool.pixi.dependencies]
@@ -138,7 +151,6 @@ ninja = ">=1.12.1,<2"
 rerun-sdk = ">=0.24.1"
 hf-transfer = ">=0.1.9"
 h5py = ">=3.14.0,<4"
-gradio = "*"
 
 
 cuda-compiler = "*"

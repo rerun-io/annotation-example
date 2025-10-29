@@ -3,7 +3,7 @@ from typing import Literal
 from jaxtyping import Float, UInt8
 from numpy import ndarray
 
-from mv_api.hand_keypoints import FinalWilorPred, HandKeypointDetectorConfig, WilorHandKeypointDetector
+from annotation_example.hand_keypoints import FinalWilorPred, HandKeypointDetectorConfig, WilorHandKeypointDetector
 
 
 class Engine:
